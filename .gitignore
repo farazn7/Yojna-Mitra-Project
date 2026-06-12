@@ -1,0 +1,20 @@
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables (for when you add API keys later)
+.env
+.env.local
+
+# Playwright Debug Outputs
+debug_screenshot.png
+debug_page.html
+
+# Project Data Outputs (Uncomment if you don't want to commit the scraped data)
+# schemes.json
