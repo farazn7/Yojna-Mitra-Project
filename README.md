@@ -20,4 +20,4 @@ Currently building the foundation of the RAG corpus. Developing a Playwright-bas
 ### 1. Clone the Repository
 ```bash
 git clone https://github.com/farazn7/Yojna-Mitra-Project.git
-cd yojana-mitra
+cd Yojna-Mitra-Project
