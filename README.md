@@ -39,8 +39,7 @@ cd Yojna-Mitra-Project
 
 ### 2. Install Dependencies
 ```bash
-pip install playwright
-playwright install chromium
+pip install requirements.txt
 ```
 
 ### 3. Execute the Pipeline
