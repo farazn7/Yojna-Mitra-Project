@@ -48,5 +48,5 @@ python scraping.py
 ```
 *Note: Phase 1 (URL Crawling) takes approximately 2 minutes. Phase 2 (Extraction) utilizes intentional politeness delays and takes about 20-30 minutes to safely complete a full state database.*
 
-## 🔮 Next Steps (Phase 2)
+##  Next Steps (Phase 2)
 With the ground-truth database constructed, the next phase involves migrating the development environment to Kaggle to leverage cloud GPUs. We will ingest `schemes.json` into a LangChain/RAG pipeline to build the intelligent matching engine and develop the core conversational AI logic.
