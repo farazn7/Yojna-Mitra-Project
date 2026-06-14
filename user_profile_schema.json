@@ -1,0 +1,31 @@
+{
+  "demographics": {
+    "age": null,
+    "gender": null,
+    "caste": null,
+    "marital_status": null,
+    "minority": false
+  },
+  "location": {
+    "residence": null
+  },
+  "professional_and_educational": {
+    "student": false,
+    "employment_status": null,
+    "occupation": null,
+    "government_employee": false
+  },
+  "financial_status": {
+    "below_poverty_line": false,
+    "economic_distress": false
+  },
+  "health_and_disability": {
+    "differently_abled": false,
+    "disability_percentage": null
+  },
+  "preferences": {
+    "scheme_category": null,
+    "benefit_type": null,
+    "dbt_scheme": false
+  }
+}
