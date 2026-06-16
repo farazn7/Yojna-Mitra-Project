@@ -1,0 +1,332 @@
+[
+  {
+    "id": "p1_widowed_farmer",
+    "demographics": {
+      "age": 55,
+      "gender": "Female",
+      "caste": "Other Backward Class (OBC)",
+      "marital_status": "Widowed",
+      "minority": false
+    },
+    "location": {
+      "residence": "Rural",
+      "state": "Tamil Nadu"
+    },
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Self-Employed/ Entrepreneur",
+      "occupation": "Farmer",
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": true,
+      "economic_distress": true
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": "Agriculture,Rural & Environment",
+      "benefit_type": "Cash",
+      "dbt_scheme": true
+    }
+  },
+  {
+    "id": "p2_rural_student",
+    "demographics": {
+      "age": 18,
+      "gender": "Male",
+      "caste": "General",
+      "marital_status": "Never Married",
+      "minority": false
+    },
+    "location": {
+      "residence": "Rural",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": true,
+      "employment_status": "Unemployed",
+      "occupation": "Student",
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": true,
+      "economic_distress": true
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": null,
+      "benefit_type": "Cash",
+      "dbt_scheme": true
+    }
+  },
+  {
+    "id": "p3_differently_abled_artist",
+    "demographics": {
+      "age": 32,
+      "gender": "Male",
+      "caste": "Scheduled Caste (SC)",
+      "marital_status": "Married",
+      "minority": false
+    },
+    "location": {
+      "residence": "Urban",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Employed",
+      "occupation": "Artists",
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": false,
+      "economic_distress": false
+    },
+    "health_and_disability": {
+      "differently_abled": true,
+      "disability_percentage": 40
+    },
+    "preferences": {
+      "scheme_category": "Social welfare & Empowerment",
+      "benefit_type": "Composite",
+      "dbt_scheme": false
+    }
+  },
+  {
+    "id": "p4_minority_female_student",
+    "demographics": {
+      "age": 21,
+      "gender": "Female",
+      "caste": "General",
+      "marital_status": "Never Married",
+      "minority": true
+    },
+    "location": {
+      "residence": "Both",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": true,
+      "employment_status": "Unemployed",
+      "occupation": "Student",
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": false,
+      "economic_distress": false
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": "Education & Learning",
+      "benefit_type": null,
+      "dbt_scheme": false
+    }
+  },
+  {
+    "id": "p5_transgender_skills",
+    "demographics": {
+      "age": 26,
+      "gender": "Transgender",
+      "caste": "Scheduled Tribe (ST)",
+      "marital_status": "Divorced",
+      "minority": false
+    },
+    "location": {
+      "residence": "Urban",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Unemployed",
+      "occupation": null,
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": true,
+      "economic_distress": true
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": "Skills & Employment",
+      "benefit_type": "In Kind",
+      "dbt_scheme": false
+    }
+  },
+  {
+    "id": "p6_fisherman_distress",
+    "demographics": {
+      "age": 42,
+      "gender": "Male",
+      "caste": "Other Backward Class (OBC)",
+      "marital_status": "Married",
+      "minority": false
+    },
+    "location": {
+      "residence": "Rural",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Self-Employed/ Entrepreneur",
+      "occupation": "Fishermen",
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": false,
+      "economic_distress": true
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": "Business & Entrepreneurship",
+      "benefit_type": null,
+      "dbt_scheme": true
+    }
+  },
+  {
+    "id": "p7_govt_employee_health",
+    "demographics": {
+      "age": 48,
+      "gender": "Female",
+      "caste": "General",
+      "marital_status": "Married",
+      "minority": false
+    },
+    "location": {
+      "residence": "Urban",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Employed",
+      "occupation": null,
+      "government_employee": true
+    },
+    "financial_status": {
+      "below_poverty_line": false,
+      "economic_distress": false
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": "Health & Wellness",
+      "benefit_type": "Cash",
+      "dbt_scheme": false
+    }
+  },
+  {
+    "id": "p8_young_mother_rural",
+    "demographics": {
+      "age": 24,
+      "gender": "Female",
+      "caste": "Scheduled Tribe (ST)",
+      "marital_status": "Married",
+      "minority": false
+    },
+    "location": {
+      "residence": "Rural",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Unemployed",
+      "occupation": null,
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": true,
+      "economic_distress": false
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": "Women and Child",
+      "benefit_type": "Composite",
+      "dbt_scheme": true
+    }
+  },
+  {
+    "id": "p9_minority_business_owner",
+    "demographics": {
+      "age": 35,
+      "gender": "Male",
+      "caste": "General",
+      "marital_status": "Married",
+      "minority": true
+    },
+    "location": {
+      "residence": "Urban",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Self-Employed/ Entrepreneur",
+      "occupation": null,
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": false,
+      "economic_distress": false
+    },
+    "health_and_disability": {
+      "differently_abled": false,
+      "disability_percentage": null
+    },
+    "preferences": {
+      "scheme_category": "Banking,Financial Services and Insurance",
+      "benefit_type": null,
+      "dbt_scheme": false
+    }
+  },
+  {
+    "id": "p10_senior_citizen_bpl",
+    "demographics": {
+      "age": 72,
+      "gender": "Male",
+      "caste": "Scheduled Caste (SC)",
+      "marital_status": "Widowed",
+      "minority": false
+    },
+    "location": {
+      "residence": "Rural",
+      "state": "Tamil Nadu"
+},
+    "professional_and_educational": {
+      "student": false,
+      "employment_status": "Unemployed",
+      "occupation": null,
+      "government_employee": false
+    },
+    "financial_status": {
+      "below_poverty_line": true,
+      "economic_distress": true
+    },
+    "health_and_disability": {
+      "differently_abled": true,
+      "disability_percentage": 60
+    },
+    "preferences": {
+      "scheme_category": "Social welfare & Empowerment",
+      "benefit_type": "Cash",
+      "dbt_scheme": true
+    }
+  }
+]

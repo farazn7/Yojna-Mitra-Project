@@ -1,0 +1,33 @@
+{
+  "id": "p9_minority_business_owner",
+  "demographics": {
+    "age": 35,
+    "gender": "Male",
+    "caste": "General",
+    "marital_status": "Married",
+    "minority": true
+  },
+  "location": {
+    "residence": "Urban",
+    "state": "Tamil Nadu"
+  },
+  "professional_and_educational": {
+    "student": false,
+    "employment_status": "Self-Employed/ Entrepreneur",
+    "occupation": null,
+    "government_employee": false
+  },
+  "financial_status": {
+    "below_poverty_line": false,
+    "economic_distress": false
+  },
+  "health_and_disability": {
+    "differently_abled": false,
+    "disability_percentage": null
+  },
+  "preferences": {
+    "scheme_category": "Banking,Financial Services and Insurance",
+    "benefit_type": null,
+    "dbt_scheme": false
+  }
+}

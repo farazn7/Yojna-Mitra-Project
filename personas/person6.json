@@ -1,0 +1,33 @@
+{
+  "id": "p6_fisherman_distress",
+  "demographics": {
+    "age": 42,
+    "gender": "Male",
+    "caste": "Other Backward Class (OBC)",
+    "marital_status": "Married",
+    "minority": false
+  },
+  "location": {
+    "residence": "Rural",
+    "state": "Tamil Nadu"
+  },
+  "professional_and_educational": {
+    "student": false,
+    "employment_status": "Self-Employed/ Entrepreneur",
+    "occupation": "Fishermen",
+    "government_employee": false
+  },
+  "financial_status": {
+    "below_poverty_line": false,
+    "economic_distress": true
+  },
+  "health_and_disability": {
+    "differently_abled": false,
+    "disability_percentage": null
+  },
+  "preferences": {
+    "scheme_category": "Business & Entrepreneurship",
+    "benefit_type": null,
+    "dbt_scheme": true
+  }
+}

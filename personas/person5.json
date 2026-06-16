@@ -1,0 +1,33 @@
+{
+  "id": "p5_transgender_skills",
+  "demographics": {
+    "age": 26,
+    "gender": "Transgender",
+    "caste": "Scheduled Tribe (ST)",
+    "marital_status": "Divorced",
+    "minority": false
+  },
+  "location": {
+    "residence": "Urban",
+    "state": "Tamil Nadu"
+  },
+  "professional_and_educational": {
+    "student": false,
+    "employment_status": "Unemployed",
+    "occupation": null,
+    "government_employee": false
+  },
+  "financial_status": {
+    "below_poverty_line": true,
+    "economic_distress": true
+  },
+  "health_and_disability": {
+    "differently_abled": false,
+    "disability_percentage": null
+  },
+  "preferences": {
+    "scheme_category": "Skills & Employment",
+    "benefit_type": "In Kind",
+    "dbt_scheme": false
+  }
+}

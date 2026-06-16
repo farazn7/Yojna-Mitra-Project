@@ -1,0 +1,499 @@
+{
+  "p1_widowed_farmer": [
+    {
+      "scheme_name": "Indira Gandhi National Widow Pension Scheme - Tamil Nadu",
+      "portal_url": "https://www.myscheme.gov.in/schemes/ignwpstn",
+      "score": 10,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "BPL match",
+        "widowed match"
+      ]
+    },
+    {
+      "scheme_name": "Destitute Widow Pension Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/dwps",
+      "score": 10,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "BPL match",
+        "widowed match"
+      ]
+    },
+    {
+      "scheme_name": "E.V.R. Maniammaiyar Ninaivu Marriage Assistance Scheme for Daughter’s of Poor Widows: Scheme-II",
+      "portal_url": "https://www.myscheme.gov.in/schemes/evrmnmasfdopwsii",
+      "score": 7,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "low income limit ₹72,000",
+        "widowed match"
+      ]
+    },
+    {
+      "scheme_name": "Dr. Dharmambal Ammaiyar Ninaivu Widow Remarriage Assistance Scheme-II",
+      "portal_url": "https://www.myscheme.gov.in/schemes/ddanwrasii",
+      "score": 7,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "widowed match"
+      ]
+    },
+    {
+      "scheme_name": "E.V.R. Maniammaiyar Ninaivu Marriage Assistance Scheme for Daughter’s of Poor Widows: Scheme-I",
+      "portal_url": "https://www.myscheme.gov.in/schemes/evrmnmasfdopwsi",
+      "score": 7,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "low income limit ₹72,000",
+        "widowed match"
+      ]
+    }
+  ],
+  "p2_rural_student": [
+    {
+      "scheme_name": "Msme Skill Training And Employment Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/msme-stes",
+      "score": 7,
+      "reasons": [
+        "age in range 18–25",
+        "occupation: student",
+        "low income limit ₹5,000"
+      ]
+    },
+    {
+      "scheme_name": "Moovalur Ramamirtham Ammaiyar Ninaivu Marriage Assistance Scheme-1",
+      "portal_url": "https://www.myscheme.gov.in/schemes/mranmas1",
+      "score": 6,
+      "reasons": [
+        "occupation: student",
+        "low income limit ₹72,000"
+      ]
+    },
+    {
+      "scheme_name": "Migrants Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/megp",
+      "score": 6,
+      "reasons": [
+        "age in range 18–45",
+        "occupation: student"
+      ]
+    },
+    {
+      "scheme_name": "Annal Ambedkar Business Champions Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/aabcs",
+      "score": 6,
+      "reasons": [
+        "occupation: student",
+        "unemployment match"
+      ]
+    },
+    {
+      "scheme_name": "Unemployment Allowance to Differently Abled Persons",
+      "portal_url": "https://www.myscheme.gov.in/schemes/uatdap",
+      "score": 6,
+      "reasons": [
+        "occupation: student",
+        "unemployment match"
+      ]
+    }
+  ],
+  "p3_differently_abled_artist": [
+    {
+      "scheme_name": "New Entrepreneur-cum-enterprise Development Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/needs",
+      "score": 10,
+      "reasons": [
+        "age in range 21–35",
+        "caste: Scheduled Caste (SC)",
+        "disability match",
+        "urban match"
+      ]
+    },
+    {
+      "scheme_name": "Unemployed Youth Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/uyegp",
+      "score": 9,
+      "reasons": [
+        "age in range 18–35",
+        "caste: Scheduled Caste (SC)",
+        "disability match"
+      ]
+    },
+    {
+      "scheme_name": "Amma Two Wheeler Scheme for Working Women",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atwsfww",
+      "score": 9,
+      "reasons": [
+        "age in range 18–40",
+        "caste: Scheduled Caste (SC)",
+        "disability match"
+      ]
+    },
+    {
+      "scheme_name": "Migrants Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/megp",
+      "score": 9,
+      "reasons": [
+        "age in range 18–45",
+        "caste: Scheduled Caste (SC)",
+        "disability match"
+      ]
+    },
+    {
+      "scheme_name": "Scheme of Giving Awards to Eminent Artists - Kalai Valarmani Award",
+      "portal_url": "https://www.myscheme.gov.in/schemes/sogateakva",
+      "score": 6,
+      "reasons": [
+        "age in range 19–35",
+        "occupation: artists"
+      ]
+    }
+  ],
+  "p4_minority_female_student": [
+    {
+      "scheme_name": "Migrants Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/megp",
+      "score": 11,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "age in range 18–45",
+        "occupation: student",
+        "minority match"
+      ]
+    },
+    {
+      "scheme_name": "Awards to Bright Students",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atbs",
+      "score": 9,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "occupation: student",
+        "minority match"
+      ]
+    },
+    {
+      "scheme_name": "Smart Phone for Hearing and Visually Impaired Persons",
+      "portal_url": "https://www.myscheme.gov.in/schemes/spfhavip",
+      "score": 9,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "occupation: student",
+        "unemployment match"
+      ]
+    },
+    {
+      "scheme_name": "Moovalur Ramamirtham Ammaiyar Ninaivu Marriage Assistance Scheme-1",
+      "portal_url": "https://www.myscheme.gov.in/schemes/mranmas1",
+      "score": 8,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "occupation: student"
+      ]
+    },
+    {
+      "scheme_name": "Annai Teresa Ninaivu Marriage Assistance Scheme for Orphan Girls-II",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atnmasfogii",
+      "score": 8,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "occupation: student"
+      ]
+    }
+  ],
+  "p5_transgender_skills": [
+    {
+      "scheme_name": "New Entrepreneur-cum-enterprise Development Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/needs",
+      "score": 12,
+      "reasons": [
+        "age in range 21–35",
+        "caste: Scheduled Tribe (ST)",
+        "transgender match",
+        "urban match",
+        "unemployment match"
+      ]
+    },
+    {
+      "scheme_name": "Unemployed Youth Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/uyegp",
+      "score": 9,
+      "reasons": [
+        "age in range 18–35",
+        "caste: Scheduled Tribe (ST)",
+        "transgender match"
+      ]
+    },
+    {
+      "scheme_name": "Amma Two Wheeler Scheme for Working Women",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atwsfww",
+      "score": 9,
+      "reasons": [
+        "age in range 18–40",
+        "BPL match",
+        "transgender match"
+      ]
+    },
+    {
+      "scheme_name": "Migrants Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/megp",
+      "score": 9,
+      "reasons": [
+        "age in range 18–45",
+        "caste: Scheduled Tribe (ST)",
+        "transgender match"
+      ]
+    },
+    {
+      "scheme_name": "Assistance to Lawyers for Starting their Practice",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atlfstp",
+      "score": 6,
+      "reasons": [
+        "low income limit ₹100,000",
+        "caste: Scheduled Tribe (ST)",
+        "unemployment match"
+      ]
+    }
+  ],
+  "p6_fisherman_distress": [
+    {
+      "scheme_name": "Distribution of Sewing Machines at Free of Cost",
+      "portal_url": "https://www.myscheme.gov.in/schemes/dsmfc",
+      "score": 7,
+      "reasons": [
+        "age in range 20–45",
+        "low income limit ₹60,000",
+        "caste: Other Backward Class (OBC)",
+        "rural match"
+      ]
+    },
+    {
+      "scheme_name": "Migrants Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/megp",
+      "score": 5,
+      "reasons": [
+        "age in range 18–45",
+        "caste: Other Backward Class (OBC)"
+      ]
+    },
+    {
+      "scheme_name": "Primary Cooperative Agriculture and Rural Development Bank: For Fishing Boats (Catamarans)",
+      "portal_url": "https://www.myscheme.gov.in/schemes/pcardbfb",
+      "score": 5,
+      "reasons": [
+        "occupation: fishermen",
+        "rural match"
+      ]
+    },
+    {
+      "scheme_name": "Issuance of Free House Sites",
+      "portal_url": "https://www.myscheme.gov.in/schemes/iofhs",
+      "score": 5,
+      "reasons": [
+        "low income limit ₹60,000",
+        "caste: Other Backward Class (OBC)",
+        "rural match"
+      ]
+    },
+    {
+      "scheme_name": "Distribution of Iron Boxes at Free of Cost",
+      "portal_url": "https://www.myscheme.gov.in/schemes/dibafc",
+      "score": 5,
+      "reasons": [
+        "low income limit ₹60,000",
+        "caste: Other Backward Class (OBC)",
+        "rural match"
+      ]
+    }
+  ],
+  "p7_govt_employee_health": [
+    {
+      "scheme_name": "Child Adoption - Tamil Nadu",
+      "portal_url": "https://www.myscheme.gov.in/schemes/catn",
+      "score": 5,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "age in range 30–55"
+      ]
+    },
+    {
+      "scheme_name": "Moovalur Ramamirtham Ammaiyar Ninaivu Marriage Assistance Scheme-1",
+      "portal_url": "https://www.myscheme.gov.in/schemes/mranmas1",
+      "score": 4,
+      "reasons": [
+        "gender: female-oriented scheme"
+      ]
+    },
+    {
+      "scheme_name": "Annai Teresa Ninaivu Marriage Assistance Scheme for Orphan Girls-II",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atnmasfogii",
+      "score": 4,
+      "reasons": [
+        "gender: female-oriented scheme"
+      ]
+    },
+    {
+      "scheme_name": "Dr. Dharmambal Ammaiyar Ninaivu Widow Remarriage Assistance Scheme-II",
+      "portal_url": "https://www.myscheme.gov.in/schemes/ddanwrasii",
+      "score": 4,
+      "reasons": [
+        "gender: female-oriented scheme"
+      ]
+    },
+    {
+      "scheme_name": "Annai Teresa Ninaivu Marriage Assistance Scheme for Orphan Girls-I",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atnmasfogi",
+      "score": 4,
+      "reasons": [
+        "gender: female-oriented scheme"
+      ]
+    }
+  ],
+  "p8_young_mother_rural": [
+    {
+      "scheme_name": "New Entrepreneur-cum-enterprise Development Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/needs",
+      "score": 11,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "age in range 21–35",
+        "caste: Scheduled Tribe (ST)",
+        "rural match",
+        "unemployment match"
+      ]
+    },
+    {
+      "scheme_name": "Moovalur Ramamirtham Ammaiyar Ninaivu Marriage Assistance Scheme-1",
+      "portal_url": "https://www.myscheme.gov.in/schemes/mranmas1",
+      "score": 8,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "low income limit ₹72,000",
+        "caste: Scheduled Tribe (ST)"
+      ]
+    },
+    {
+      "scheme_name": "Amma Two Wheeler Scheme for Working Women",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atwsfww",
+      "score": 8,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "age in range 18–40",
+        "BPL match"
+      ]
+    },
+    {
+      "scheme_name": "Government Service Home - Tamil Nadu",
+      "portal_url": "https://www.myscheme.gov.in/schemes/gshtn",
+      "score": 8,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "age in range 14–45",
+        "BPL match"
+      ]
+    },
+    {
+      "scheme_name": "Migrants Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/megp",
+      "score": 8,
+      "reasons": [
+        "gender: female-oriented scheme",
+        "age in range 18–45",
+        "caste: Scheduled Tribe (ST)"
+      ]
+    }
+  ],
+  "p9_minority_business_owner": [
+    {
+      "scheme_name": "Unemployed Youth Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/uyegp",
+      "score": 4,
+      "reasons": [
+        "age in range 18–35",
+        "minority match"
+      ]
+    },
+    {
+      "scheme_name": "Migrants Employment Generation Programme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/megp",
+      "score": 4,
+      "reasons": [
+        "age in range 18–45",
+        "minority match"
+      ]
+    },
+    {
+      "scheme_name": "New Entrepreneur-cum-enterprise Development Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/needs",
+      "score": 3,
+      "reasons": [
+        "age in range 21–35",
+        "urban match"
+      ]
+    },
+    {
+      "scheme_name": "Distribution of Sewing Machines at Free of Cost",
+      "portal_url": "https://www.myscheme.gov.in/schemes/dsmfc",
+      "score": 3,
+      "reasons": [
+        "age in range 20–45",
+        "urban match"
+      ]
+    },
+    {
+      "scheme_name": "Amma Two Wheeler Scheme for Working Women",
+      "portal_url": "https://www.myscheme.gov.in/schemes/atwsfww",
+      "score": 2,
+      "reasons": [
+        "age in range 18–40"
+      ]
+    }
+  ],
+  "p10_senior_citizen_bpl": [
+    {
+      "scheme_name": "Indira Gandhi National Disability Pension Scheme - Tamil Nadu",
+      "portal_url": "https://www.myscheme.gov.in/schemes/igndpstn",
+      "score": 8,
+      "reasons": [
+        "BPL match",
+        "disability match"
+      ]
+    },
+    {
+      "scheme_name": "Indira Gandhi National Widow Pension Scheme - Tamil Nadu",
+      "portal_url": "https://www.myscheme.gov.in/schemes/ignwpstn",
+      "score": 7,
+      "reasons": [
+        "BPL match",
+        "widowed match"
+      ]
+    },
+    {
+      "scheme_name": "Destitute Widow Pension Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/dwps",
+      "score": 7,
+      "reasons": [
+        "BPL match",
+        "widowed match"
+      ]
+    },
+    {
+      "scheme_name": "Pension Scheme for the Journalists",
+      "portal_url": "https://www.myscheme.gov.in/schemes/psftj",
+      "score": 6,
+      "reasons": [
+        "low income limit ₹50,000",
+        "disability match"
+      ]
+    },
+    {
+      "scheme_name": "Destitute Differently Abled Pension Scheme",
+      "portal_url": "https://www.myscheme.gov.in/schemes/ddaps",
+      "score": 6,
+      "reasons": [
+        "low income limit ₹5,000",
+        "disability match"
+      ]
+    }
+  ]
+}

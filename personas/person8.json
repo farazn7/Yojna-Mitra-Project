@@ -1,0 +1,33 @@
+{
+  "id": "p8_young_mother_rural",
+  "demographics": {
+    "age": 24,
+    "gender": "Female",
+    "caste": "Scheduled Tribe (ST)",
+    "marital_status": "Married",
+    "minority": false
+  },
+  "location": {
+    "residence": "Rural",
+    "state": "Tamil Nadu"
+  },
+  "professional_and_educational": {
+    "student": false,
+    "employment_status": "Unemployed",
+    "occupation": null,
+    "government_employee": false
+  },
+  "financial_status": {
+    "below_poverty_line": true,
+    "economic_distress": false
+  },
+  "health_and_disability": {
+    "differently_abled": false,
+    "disability_percentage": null
+  },
+  "preferences": {
+    "scheme_category": "Women and Child",
+    "benefit_type": "Composite",
+    "dbt_scheme": true
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "p4_minority_female_student",
+  "demographics": {
+    "age": 21,
+    "gender": "Female",
+    "caste": "General",
+    "marital_status": "Never Married",
+    "minority": true
+  },
+  "location": {
+    "residence": "Both",
+    "state": "Tamil Nadu"
+  },
+  "professional_and_educational": {
+    "student": true,
+    "employment_status": "Unemployed",
+    "occupation": "Student",
+    "government_employee": false
+  },
+  "financial_status": {
+    "below_poverty_line": false,
+    "economic_distress": false
+  },
+  "health_and_disability": {
+    "differently_abled": false,
+    "disability_percentage": null
+  },
+  "preferences": {
+    "scheme_category": "Education & Learning",
+    "benefit_type": null,
+    "dbt_scheme": false
+  }
+}

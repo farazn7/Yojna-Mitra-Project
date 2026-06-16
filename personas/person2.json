@@ -1,0 +1,33 @@
+{
+  "id": "p2_rural_student",
+  "demographics": {
+    "age": 18,
+    "gender": "Male",
+    "caste": "General",
+    "marital_status": "Never Married",
+    "minority": false
+  },
+  "location": {
+    "residence": "Rural",
+    "state": "Tamil Nadu"
+  },
+  "professional_and_educational": {
+    "student": true,
+    "employment_status": "Unemployed",
+    "occupation": "Student",
+    "government_employee": false
+  },
+  "financial_status": {
+    "below_poverty_line": true,
+    "economic_distress": true
+  },
+  "health_and_disability": {
+    "differently_abled": false,
+    "disability_percentage": null
+  },
+  "preferences": {
+    "scheme_category": null,
+    "benefit_type": "Cash",
+    "dbt_scheme": true
+  }
+}
