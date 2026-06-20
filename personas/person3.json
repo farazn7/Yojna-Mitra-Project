@@ -1,33 +1,16 @@
 {
   "id": "p3_differently_abled_artist",
-  "demographics": {
-    "age": 32,
-    "gender": "Male",
-    "caste": "Scheduled Caste (SC)",
-    "marital_status": "Married",
-    "minority": false
-  },
-  "location": {
-    "residence": "Urban",
-    "state": "Tamil Nadu"
-  },
-  "professional_and_educational": {
-    "student": false,
-    "employment_status": "Employed",
-    "occupation": "Artists",
-    "government_employee": false
-  },
-  "financial_status": {
-    "below_poverty_line": false,
-    "economic_distress": false
-  },
-  "health_and_disability": {
-    "differently_abled": true,
-    "disability_percentage": 40
-  },
-  "preferences": {
-    "scheme_category": "Social welfare & Empowerment",
-    "benefit_type": "Composite",
-    "dbt_scheme": false
-  }
+  "gender": "Male",
+  "age": 32,
+  "income": 140000,
+  "caste": "SC",
+  "residence": "Urban",
+  "marital_status": "Married",
+  "differently_abled": true,
+  "disability_percentage": 40,
+  "minority": false,
+  "below_poverty_line": false,
+  "economic_distress": false,
+  "government_employee": false,
+  "student": false
 }

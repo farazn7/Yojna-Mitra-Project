@@ -1,33 +1,16 @@
 {
   "id": "p1_widowed_farmer",
-  "demographics": {
-    "age": 55,
-    "gender": "Female",
-    "caste": "Other Backward Class (OBC)",
-    "marital_status": "Widowed",
-    "minority": false
-  },
-  "location": {
-    "residence": "Rural",
-    "state": "Tamil Nadu"
-  },
-  "professional_and_educational": {
-    "student": false,
-    "employment_status": "Self-Employed/ Entrepreneur",
-    "occupation": "Farmer",
-    "government_employee": false
-  },
-  "financial_status": {
-    "below_poverty_line": true,
-    "economic_distress": true
-  },
-  "health_and_disability": {
-    "differently_abled": false,
-    "disability_percentage": null
-  },
-  "preferences": {
-    "scheme_category": "Agriculture,Rural & Environment",
-    "benefit_type": "Cash",
-    "dbt_scheme": true
-  }
+  "gender": "Female",
+  "age": 55,
+  "income": 45000,
+  "caste": "OBC",
+  "residence": "Rural",
+  "marital_status": "Widowed",
+  "differently_abled": false,
+  "disability_percentage": null,
+  "minority": false,
+  "below_poverty_line": true,
+  "economic_distress": true,
+  "government_employee": false,
+  "student": false
 }

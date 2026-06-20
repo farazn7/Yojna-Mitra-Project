@@ -1,1 +1,13 @@
-playwright>=1.40.0
+# --- Phase 1: Web Scraping & Automation ---
+playwright==1.42.0
+
+# --- Phase 2: Testing Framework ---
+pytest==8.1.1
+
+# --- Phase 3: Database & Vector Storage ---
+psycopg2-binary==2.9.9
+pgvector==0.2.5
+
+# --- Phase 3: Local LLM & RAG Engine ---
+ollama==0.1.7
+pydantic==2.6.4

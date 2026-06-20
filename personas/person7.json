@@ -1,33 +1,16 @@
 {
   "id": "p7_govt_employee_health",
-  "demographics": {
-    "age": 48,
-    "gender": "Female",
-    "caste": "General",
-    "marital_status": "Married",
-    "minority": false
-  },
-  "location": {
-    "residence": "Urban",
-    "state": "Tamil Nadu"
-  },
-  "professional_and_educational": {
-    "student": false,
-    "employment_status": "Employed",
-    "occupation": null,
-    "government_employee": true
-  },
-  "financial_status": {
-    "below_poverty_line": false,
-    "economic_distress": false
-  },
-  "health_and_disability": {
-    "differently_abled": false,
-    "disability_percentage": null
-  },
-  "preferences": {
-    "scheme_category": "Health & Wellness",
-    "benefit_type": "Cash",
-    "dbt_scheme": false
-  }
+  "gender": "Female",
+  "age": 48,
+  "income": 650000,
+  "caste": "General",
+  "residence": "Urban",
+  "marital_status": "Married",
+  "differently_abled": false,
+  "disability_percentage": null,
+  "minority": false,
+  "below_poverty_line": false,
+  "economic_distress": false,
+  "government_employee": true,
+  "student": false
 }

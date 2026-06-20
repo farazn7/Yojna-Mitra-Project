@@ -1,33 +1,16 @@
 {
   "id": "p10_senior_citizen_bpl",
-  "demographics": {
-    "age": 72,
-    "gender": "Male",
-    "caste": "Scheduled Caste (SC)",
-    "marital_status": "Widowed",
-    "minority": false
-  },
-  "location": {
-    "residence": "Rural",
-    "state": "Tamil Nadu"
-  },
-  "professional_and_educational": {
-    "student": false,
-    "employment_status": "Unemployed",
-    "occupation": null,
-    "government_employee": false
-  },
-  "financial_status": {
-    "below_poverty_line": true,
-    "economic_distress": true
-  },
-  "health_and_disability": {
-    "differently_abled": true,
-    "disability_percentage": 60
-  },
-  "preferences": {
-    "scheme_category": "Social welfare & Empowerment",
-    "benefit_type": "Cash",
-    "dbt_scheme": true
-  }
+  "gender": "Male",
+  "age": 72,
+  "income": null,
+  "caste": "SC",
+  "residence": "Rural",
+  "marital_status": "Widowed",
+  "differently_abled": true,
+  "disability_percentage": 60,
+  "minority": false,
+  "below_poverty_line": true,
+  "economic_distress": true,
+  "government_employee": false,
+  "student": false
 }
