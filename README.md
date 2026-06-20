@@ -4,7 +4,7 @@ Yojana Mitra is an autonomous AI agent deployed on WhatsApp designed to discover
 
 The system leverages natural language processing (Hindi/English), document retrieval via DigiLocker OAuth, and browser automation to navigate complex government portals, specifically targeting users in rural and semi-urban areas who face language and technical barriers.
 
-## 🛠️ Project Architecture & Tech Stack
+##  Project Architecture & Tech Stack
 * **Language:** Python 3.13
 * **Automation & Scraping:** Playwright (Sync API)
 * **Data Layer:** PostgreSQL with `pgvector` extension (Hybrid RAG)
@@ -13,7 +13,7 @@ The system leverages natural language processing (Hindi/English), document retri
 
 ---
 
-## 🚀 Engineering Milestones Achieved
+##  Engineering Milestones Achieved
 
 ### Phase 1: Data Engineering & Extraction
 Developed a highly resilient, Playwright-based spider to navigate the dynamic Next.js/React architecture of `myScheme.gov.in`.
@@ -34,7 +34,7 @@ To eliminate semantic blindspots, the backend was migrated to a robust **Hybrid 
 
 ---
 
-## 📁 Repository Structure
+##  Repository Structure
 
 * **Data Extraction Layer:**
   * `scraping.py`: Playwright web crawler targeting web portals.
@@ -55,7 +55,7 @@ To eliminate semantic blindspots, the backend was migrated to a robust **Hybrid 
 
 ---
 
-## 💻 Local Setup & Installation
+##  Local Setup & Installation
 
 ### 1. Clone the Repository
 ```bash
