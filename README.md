@@ -1,10 +1,10 @@
 # Yojana Mitra Project
 
-Yojana Mitra is an autonomous AI agent deployed on WhatsApp designed to discover Indian government welfare schemes a user qualifies for and automatically apply on their behalf[cite: 11]. 
+Yojana Mitra is an autonomous AI agent deployed on WhatsApp designed to discover Indian government welfare schemes a user qualifies for and automatically apply on their behalf. 
 
-The system leverages natural language processing (Hindi/English), document retrieval via DigiLocker OAuth, and browser automation to navigate complex government portals, specifically targeting users in rural and semi-urban areas who face language and technical barriers[cite: 11].
+The system leverages natural language processing (Hindi/English), document retrieval via DigiLocker OAuth, and browser automation to navigate complex government portals, specifically targeting users in rural and semi-urban areas who face language and technical barriers.
 
-## 🛠️ Project Architecture & Tech Stack
+##  Project Architecture & Tech Stack
 * **Language:** Python 3.13
 * **Automation & Scraping:** Playwright (Sync API)
 * **Data Layer:** PostgreSQL with `pgvector` extension (Hybrid RAG)
@@ -13,16 +13,16 @@ The system leverages natural language processing (Hindi/English), document retri
 
 ---
 
-## 🚀 Engineering Milestones Achieved
+##  Engineering Milestones Achieved
 
 ### Phase 1: Data Engineering & Extraction
-Developed a highly resilient, Playwright-based spider to navigate the dynamic Next.js/React architecture of `myScheme.gov.in`[cite: 11].
+Developed a highly resilient, Playwright-based spider to navigate the dynamic Next.js/React architecture of `myScheme.gov.in`.
 * **React State Hydration Bypassing:** Utilized a "Green Button" DOM-polling strategy to ensure pagination only triggered after React fully painted new page elements, preventing stale-element duplication.
 * **Idempotency & State Persistence:** Implemented a two-file architecture (`schemes.json` and `progress.json`). The script saves progress after every 10 extractions, allowing it to seamlessly resume from crashes without duplicating data.
 * **Anti-Bot Evasion:** Integrated randomized politeness delays to avoid triggering HTTP 429 server blocks, and recycled browser contexts to prevent memory bloat.
 * **Hidden DOM Extraction:** Bypassed "Strict Mode" layout hiding by targeting parent container IDs (`#eligibility`, `#documents-required`) directly instead of triggering unstable visible UI tabs.
 
-**Result:** Extracted eligibility criteria, required documents, and URLs for **230 unique State/UT schemes in Tamil Nadu** into a structured reference database[cite: 11].
+**Result:** Extracted eligibility criteria, required documents, and URLs for **230 unique State/UT schemes in Tamil Nadu** into a structured reference database.
 
 ### Phase 2: Hybrid RAG Architecture & Persona Evaluation
 We initially explored a legacy keyword heuristic engine (`test_matcher.py` / `matcher.py`) utilizing regular expressions to filter attributes. However, classical NLP proved unscalable for highly nuanced legislative texts (e.g., matching the phrase *"The boy should be 21"* inside a female marriage assistance scheme with a 21-year-old male profile due to raw keyword collision).
@@ -34,7 +34,7 @@ To eliminate semantic blindspots, the backend was migrated to a robust **Hybrid 
 
 ---
 
-## 📁 Repository Structure
+##  Repository Structure
 
 * **Data Extraction Layer:**
   * `scraping.py`: Playwright web crawler targeting web portals.
@@ -55,7 +55,7 @@ To eliminate semantic blindspots, the backend was migrated to a robust **Hybrid 
 
 ---
 
-## 💻 Local Setup & Installation
+##  Local Setup & Installation
 
 ### 1. Clone the Repository
 ```bash
