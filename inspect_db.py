@@ -5,13 +5,10 @@ try:
     from psycopg2.extras import RealDictCursor
 except ImportError:
     print("❌ Missing dependency: psycopg2")
-    print("Install it with:")
-    print("  py -m pip install psycopg2-binary")
+    print("Install it with: pip install psycopg2-binary")
     sys.exit(1)
 
-
-def inspect_database(limit=15):
-    # Connect to the local Postgres container
+def inspect_database(limit=5):
     conn = psycopg2.connect(
         dbname="postgres",
         user="postgres",
@@ -21,125 +18,81 @@ def inspect_database(limit=15):
     )
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # 1. Show all schemas and tables in the database
-    print("📚 Database overview")
+    # 1. Fetch all tables strictly in the public schema
+    cur.execute("""
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        ORDER BY table_name;
+    """)
+    tables = [row['table_name'] for row in cur.fetchall()]
+
+    print("📚 Database Overview (public schema)")
     print("=" * 70)
-    cur.execute("""
-        SELECT schema_name
-        FROM information_schema.schemata
-        ORDER BY schema_name;
-    """)
-    print("Schemas:")
-    for row in cur.fetchall():
-        print(f"  - {row['schema_name']}")
-
-    cur.execute("""
-        SELECT table_schema, table_name
-        FROM information_schema.tables
-        WHERE table_type = 'BASE TABLE'
-        ORDER BY table_schema, table_name;
-    """)
-    print("\nTables:")
-    for row in cur.fetchall():
-        print(f"  - {row['table_schema']}.{row['table_name']}")
-    print("\n" + "=" * 70)
-
-    # 2. Inspect government_schemes if it exists
-    cur.execute("""
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-            AND table_name = 'government_schemes'
-        ) AS exists_flag;
-    """)
-    table_exists = cur.fetchone()['exists_flag']
-
-    if not table_exists:
-        print("❌ Table 'public.government_schemes' does not exist.")
+    if not tables:
+        print("❌ No tables found in the 'public' schema yet.")
+        print("Run your initialization/migration scripts to seed your tables.")
         cur.close()
         conn.close()
         return
-
-    print("\n🔎 Inspecting public.government_schemes")
+        
+    for t in tables:
+        print(f"  - public.{t}")
     print("=" * 70)
 
-    # 3. Total records
-    cur.execute("SELECT COUNT(*) AS total FROM public.government_schemes;")
-    total_records = cur.fetchone()['total']
-    print(f"📊 Total records: {total_records}")
+    # 2. Dynamically inspect every table found
+    for table in tables:
+        print(f"\n🔎 Inspecting public.{table}")
+        print("=" * 70)
 
-    if total_records == 0:
-        print("❌ No records found in the table.")
-        cur.close()
-        conn.close()
-        return
+        # Get Total Count
+        cur.execute(f'SELECT COUNT(*) AS total FROM public."{table}";')
+        total_records = cur.fetchone()['total']
+        print(f"📊 Total records: {total_records}")
 
-    # 4. Show schema for the table
-    cur.execute("""
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'government_schemes'
-        ORDER BY ordinal_position;
-    """)
-    print("\n🔧 Columns:")
-    for row in cur.fetchall():
-        print(f"  - {row['column_name']}: {row['data_type']}")
+        # Get Columns & Types
+        cur.execute(f"""
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' AND table_name = '{table}'
+            ORDER BY ordinal_position;
+        """, (table,))
+        columns = cur.fetchall()
+        
+        print("\n🔧 Columns:")
+        for col in columns:
+            print(f"  - {col['column_name']}: {col['data_type']}")
 
-    # 5. Show first rows with readable previews
-    # Some existing databases may not have portal_url yet, so inspect the columns first
-    cur.execute("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'government_schemes';
-    """)
-    existing_columns = {row['column_name'] for row in cur.fetchall()}
+        if total_records == 0:
+            print("  ℹ️ Table is currently empty.")
+            continue
 
-    select_columns = [
-        'id',
-        'scheme_name',
-        'documents_needed',
-        'LEFT(details, 300) AS details_preview',
-        'LEFT(eligibility_rules, 300) AS eligibility_preview',
-        'min_age',
-        'max_age',
-        'max_income',
-        'is_differently_abled',
-        'is_women_only'
-    ]
+        # Fetch raw rows and handle string truncation safely in Python
+        cur.execute(f'SELECT * FROM public."{table}" LIMIT %s;', (limit,))
+        rows = cur.fetchall()
 
-    if 'portal_url' in existing_columns:
-        select_columns.insert(2, 'portal_url')
+        print(f"\n🔎 First {len(rows)} rows (limit={limit}):")
+        for row in rows:
+            print("\n" + "-" * 70)
+            for key, value in row.items():
+                # Format previews safely without crashing on vector or jsonb types
+                if value is None:
+                    display_val = "NULL"
+                elif isinstance(value, (dict, list)):
+                    import json
+                    display_val = json.dumps(value)
+                else:
+                    display_val = str(value)
 
-    query = f"""
-        SELECT
-            {',\n            '.join(select_columns)},
-            vector_dims(embedding) AS embedding_dims,
-            LEFT(embedding::text, 90) AS embedding_preview
-        FROM public.government_schemes
-        ORDER BY id
-        LIMIT %s;
-    """
-    cur.execute(query, (limit,))
-
-    rows = cur.fetchall()
-    print(f"\n🔎 First {len(rows)} rows (limit={limit}):")
-    for row in rows:
-        print("\n" + "-" * 70)
-        for key in row.keys():
-            value = row[key]
-            if value is None:
-                value = "NULL"
-            elif isinstance(value, str) and len(value) > 250:
-                value = value[:247] + "..."
-            print(f"  {key}: {value}")
-    print("\n" + "=" * 70)
+                # Safe character truncation
+                if len(display_val) > 250:
+                    display_val = display_val[:247] + "..."
+                    
+                print(f"  {key}: {display_val}")
+        print("\n" + "=" * 70)
 
     cur.close()
     conn.close()
-
 
 if __name__ == "__main__":
     inspect_database()

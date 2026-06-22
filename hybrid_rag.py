@@ -11,78 +11,38 @@ def setup_db_connection():
         port="5432"
     )
 
-def rerank_schemes(persona, user_query, rows):
-    """Boost schemes that match the user's exact need and penalize unrelated ones."""
-    def normalize(text):
-        return re.findall(r"[a-zA-Z]+", text.lower())
+def sanitize_response(response_text, context_urls):
+    """Remove URLs that were not provided in the retrieval context."""
+    found_urls = re.findall(r'https?://[^\s)\]]+', response_text)
+    for url in found_urls:
+        clean_url = url.rstrip('.,;:')
+        if clean_url not in context_urls:
+            response_text = response_text.replace(url, "[verified URL not available in provided context]")
+    return response_text
 
-    query_terms = set(normalize(user_query))
-    query_lower = user_query.lower()
-    scored = []
-
-    # Persona-specific intent hints
-    persona_hint_terms = set()
-    if persona.get('marital_status') == 'Widowed':
-        persona_hint_terms.update({'widow', 'widowed', 'pension', 'financial', 'assistance'})
-    if persona.get('student'):
-        persona_hint_terms.update({'student', 'scholarship', 'education', 'college', 'fee'})
-    if persona.get('differently_abled') or persona.get('disability_percentage'):
-        persona_hint_terms.update({'disability', 'disabled', 'artist', 'grant', 'instrument'})
-    if persona.get('government_employee'):
-        persona_hint_terms.update({'government', 'employee', 'health', 'insurance', 'hospital'})
-
-    for row in rows:
-        scheme_name, url, details, eligibility, distance = row
-        text = f"{scheme_name} {details} {eligibility}".lower()
-        scheme_terms = set(normalize(text))
-
-        overlap = len((query_terms | persona_hint_terms) & scheme_terms)
-
-        # Strong boosts for exact need phrases
-        phrase_boost = 0
-        if any(term in text for term in ['widow', 'widowed']) and any(term in query_lower for term in ['widow', 'widowed']):
-            phrase_boost += 6
-        if any(term in text for term in ['pension', 'financial assistance', 'cash']) and any(term in query_lower for term in ['financial', 'pension', 'cash', 'loan', 'assistance']):
-            phrase_boost += 5
-        if any(term in text for term in ['scholarship', 'education', 'college', 'fee']) and any(term in query_lower for term in ['scholarship', 'education', 'college', 'fee']):
-            phrase_boost += 6
-        if any(term in text for term in ['disability', 'disabled', 'artist', 'instrument', 'grant']) and any(term in query_lower for term in ['disabled', 'disability', 'artist', 'instrument', 'grant']):
-            phrase_boost += 6
-        if any(term in text for term in ['health', 'insurance', 'hospital']) and any(term in query_lower for term in ['health', 'insurance', 'hospital']):
-            phrase_boost += 6
-
-        # Penalize obviously unrelated death/funeral schemes
-        if any(term in text for term in ['funeral', 'death']) and not any(term in query_lower for term in ['death', 'funeral', 'died', 'dead']):
-            phrase_boost -= 10
-
-        score = overlap * 12 + phrase_boost - (distance * 250)
-        scored.append((score, row))
-
-    return [row for _, row in sorted(scored, key=lambda item: item[0], reverse=True)]
-
-
-def perform_hybrid_search(persona, user_query, top_k=7):
+def run_yojana_pipeline(profile_data, user_query, top_k=3):
     """
-    Combines the user's hard demographic profile with their semantic chat query.
+    THE LIVE RUNTIME GATEWAY:
+    Processes the user's chat query and database profile metadata 
+    through a strict SQL filter, pgvector matching, and structured LLM generation loop.
     """
     conn = setup_db_connection()
     cur = conn.cursor()
 
-    print(f"🧠 1. Embedding live user query: '{user_query}'...")
-    # Convert the WhatsApp message into a math vector
-    vector_response = ollama.embeddings(
-        model='nomic-embed-text', 
-        prompt=user_query
-    )
+    # 1. Generate live query embedding
+    vector_response = ollama.embeddings(model='nomic-embed-text', prompt=user_query)
     query_vector = vector_response['embedding']
 
-    # Handle null income safely for the SQL math
-    # If income is null (like for a student), treat it as 0 so they pass the max_income check
-    safe_income = persona['income'] if persona['income'] is not None else 0
+    # 2. Extract profile fields safely from the dynamic database data dictionary
+    user_age = int(profile_data.get('age', 0))
+    user_gender = profile_data.get('gender', 'Other')
+    user_disabled = bool(profile_data.get('differently_abled', False))
+    
+    # Safe income parsing matching our test script defaults
+    raw_income = profile_data.get('income')
+    safe_income = int(raw_income) if raw_income is not None else 0
 
-    print("🔎 2. Running Hybrid SQL Query (Hard Filters + Vector Math)...")
-    # THE HYBRID QUERY
-    # We use the boolean flags currently in your DB (is_women_only, is_differently_abled)
+    # 3. Hybrid Database Execution Matching
     sql_query = """
         SELECT scheme_name, portal_url, details, eligibility_rules,
                (embedding <=> %s::vector) as distance
@@ -99,100 +59,90 @@ def perform_hybrid_search(persona, user_query, top_k=7):
     
     cur.execute(sql_query, (
         query_vector,
-        persona['age'],             # For min_age check
-        persona['age'],             # For max_age check
-        safe_income,                # For max_income check
-        persona['gender'],          # Only pass if scheme is not women-only OR user is female
-        persona['differently_abled'],# Only pass if scheme is not disabled-only OR user is disabled
+        user_age,
+        user_age,
+        safe_income,
+        user_gender,
+        user_disabled,
         top_k
     ))
     
-    results = cur.fetchall()
+    retrieved_schemes = cur.fetchall()
     cur.close()
     conn.close()
 
-    # Re-rank the retrieved candidates using explicit relevance cues so the model
-    # sees the most likely scheme first, instead of relying only on embedding distance.
-    return rerank_schemes(persona, user_query, results)
-
-def generate_rag_response(user_query, retrieved_schemes):
-    """
-    Forces Llama 3.1 to answer the live chat query using ONLY the filtered government data.
-    """
-    print("🤖 3. Generating RAG response with Llama 3.1...")
-    
+    # Terminal Pipeline Diagnostics Log
+    print("\n" + "="*70)
+    print("🔍 Hybrid Database Filtering Matches:")
     if not retrieved_schemes:
-        return "Namaste. Based on your profile and age/income details, I couldn't find an exact match right now. Could you tell me more about what you are looking for?"
+        print("  _No schemes cleared the hard demographic criteria filters._")
+    for idx, row in enumerate(retrieved_schemes, 1):
+        print(f"  {idx}. **{row[0]}** (Distance: {row[4]:.4f}) | URL: <{row[1]}>")
+    print("="*70 + "\n")
 
+    # 4. Guard check if no schemes pass
+    if not retrieved_schemes:
+        return "Namaste. Based on your current profile details, I could not find an exact match among the active government schemes. Could you please share more information about your situation?"
+
+    # 5. Build dynamic context blocks and extract verified target URLs
     context_blocks = []
-    for rank, row in enumerate(retrieved_schemes, 1):
-        scheme_name = row[0]
-        portal_url = row[1]
-        details = row[2]
-        rules = row[3]
-        
-        block = f"--- Scheme {rank}: {scheme_name} ---\n" \
-                f"URL: {portal_url}\n" \
-                f"Details: {details}\n" \
-                f"Rules: {rules}\n"
-        context_blocks.append(block)
-        
+    context_urls = set()
+    
+    for idx, row in enumerate(retrieved_schemes, 1):
+        scheme_name, url, details, eligibility = row[0], row[1], row[2], row[3]
+        if url:
+            context_urls.add(url)
+        context_blocks.append(
+            f"--- SCHEME {idx} ---\nName: {scheme_name}\nURL: {url}\nDetails: {details}\nEligibility: {eligibility}\n"
+        )
     context_string = "\n".join(context_blocks)
 
+    # 6. Build the dynamic User Profile context explicitly for the LLM
+    verified_profile = f"""
+    - Age: {user_age} years old
+    - Gender: {user_gender}
+    - Occupation: {profile_data.get('occupation', 'None')}
+    - Family Income: ₹{safe_income:,} per annum
+    - Residence: {profile_data.get('residence', 'Unknown')}
+    - Caste Category: {profile_data.get('caste', 'General')}
+    - Minority Status: {profile_data.get('minority', False)}
+    - Marital Status: {profile_data.get('marital_status', 'Single')}
+    - BPL Card Holder: {profile_data.get('below_poverty_line', False)}
+    """
+
+    # 7. Strictly defined System Prompt forcing profile evaluation constraints
     system_prompt = f"""
-    You are Yojana Mitra, a helpful WhatsApp assistant for Indian citizens.
-    Answer the user's query using ONLY the government schemes provided in the context below.
-    If the context does not contain relevant schemes, say you cannot find a match right now.
-    Keep your answer conversational, easy to understand, and always provide the portal URL.
+    You are Yojana Mitra, a helpful WhatsApp AI assistant for Indian citizens.
+
+    CRITICAL USER PROFILE FACTS:
+    {verified_profile}
     
-    CONTEXT:
+    TASK: Read the user's message, review ALL provided schemes, and recommend the matches.
+
+    STRICT RULES:
+    1. SYNTHESIZE ALL DATA: You MUST evaluate and discuss ALL the schemes provided in the CONTEXT DATA below. Do not ignore a scheme just because it is at the bottom of the list. Explain how each one can be utilized by the user.
+    2. THE INSENSITIVITY FILTER: You must silently hide schemes that are actively morbid or conflicting with a positive life event. 
+       - Example: If a user is happily pregnant and asking for nutrition/delivery support, DO NOT mention miscarriage or abortion assistance schemes.
+       - Do not apologize for excluding a scheme; just silently drop it.
+    3. NO HALLUCINATIONS: Do not invent URLs, facts, or external schemes. Base your response purely on the provided context.
+
+    CONTEXT DATA:
     {context_string}
     """
 
+    # 8. Run inference matching the optimized test framework options
     response = ollama.chat(
         model='llama3.1',
         messages=[
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': user_query}
         ],
-        options={'temperature': 0.2} # Low temperature for factual accuracy
+        options={
+            'temperature': 0.1,
+            'num_predict': 600,   
+            'num_thread': 4
+        }
     )
     
-    return response['message']['content']
-
-def main():
-    # 1. The Database Profile (Persona without the query)
-    test_persona = {
-        "id": "p2_rural_student",
-        "gender": "Male",
-        "age": 18,
-        "income": None,
-        "caste": "General",
-        "residence": "Rural",
-        "marital_status": "Never Married",
-        "differently_abled": False,
-        "disability_percentage": None,
-        "student": True
-    }
-    
-    # 2. The Live Chat Input (From WhatsApp)
-    live_user_query = "I just finished school and need help paying for college fees. Are there any scholarships?"
-    
-    print("="*60)
-    print(f"PROFILE LOADED: {test_persona['id']} | Age: {test_persona['age']} | Income: {test_persona['income']}")
-    print(f"LIVE MESSAGE: {live_user_query}")
-    print("="*60)
-    
-    # Execute Hybrid Retrieval
-    top_schemes = perform_hybrid_search(test_persona, live_user_query)
-    
-    # Execute Generation
-    final_answer = generate_rag_response(live_user_query, top_schemes)
-    
-    print("\n" + "="*60)
-    print("🎯 FINAL WHATSAPP OUTPUT:")
-    print("="*60)
-    print(final_answer)
-
-if __name__ == "__main__":
-    main()
+    final_response = response['message']['content']
+    return sanitize_response(final_response, context_urls)

@@ -5,12 +5,12 @@ import ollama
 from pydantic import BaseModel
 from typing import Optional
 
-# 1. Define the exact structure we want the LLM to extract
+# 1. Exact structure for LLM metadata extraction
 class SchemeMetadata(BaseModel):
     min_age: Optional[int]
     max_age: Optional[int]
     max_income: Optional[int]
-    target_professions: list[str] # Let the LLM populate this dynamically!
+    target_professions: list[str]  # Populated dynamically by Llama 3.1
     is_differently_abled: bool
     is_women_only: bool
 
@@ -30,8 +30,7 @@ def setup_database():
 
     cur.execute("DROP TABLE IF EXISTS government_schemes;")
 
-    # We now have dedicated columns for our structured LLM outputs
-    # portal_url is important and must be kept explicitly to avoid losing scheme URLs
+    # ADDED: target_professions TEXT[] to store the array of eligible occupations
     cur.execute("""
         CREATE TABLE government_schemes (
             id SERIAL PRIMARY KEY,
@@ -43,6 +42,7 @@ def setup_database():
             min_age INT,
             max_age INT,
             max_income INT,
+            target_professions TEXT[], 
             is_differently_abled BOOLEAN,
             is_women_only BOOLEAN,
             embedding VECTOR(768)
@@ -52,11 +52,17 @@ def setup_database():
 
 def extract_metadata(text: str) -> SchemeMetadata:
     """Force Llama 3.1 to extract structured JSON based on our Pydantic model."""
+    # UPDATED: Added precise prompt directions for occupation array synthesis
     prompt = f"""
-    Analyze the following government scheme text. Extract the eligibility criteria. 
-    If a maximum income is mentioned, return it as an integer. If an age limit is mentioned, return it.
-    Determine if this scheme is specifically targeted at differently abled individuals, or women only.
-    If a value is not mentioned, return null for integers, or false for booleans.
+    Analyze the following government scheme text and extract the eligibility criteria.
+    
+    1. If a maximum income bound is mentioned, return it as an integer. 
+    2. If age limits are mentioned, return them as integers.
+    3. Identify any specific target occupations or professions mentioned (e.g., "Farmer", "Student", "Weaver", "Artisan", "Unemployed"). 
+       Return them as a clean list of strings in 'target_professions'. If it applies to any occupation generally, return an empty list [].
+    4. Determine if this scheme is specifically targeted at differently abled individuals, or women only.
+    
+    If numerical attributes are not mentioned, return null. For booleans, default to false.
     
     Text:
     {text}
@@ -69,7 +75,6 @@ def extract_metadata(text: str) -> SchemeMetadata:
         options={'temperature': 0}
     )
     
-    # Parse the strictly formatted JSON back into our Pydantic object
     return SchemeMetadata.model_validate_json(response['message']['content'])
 
 def get_embedding(text):
@@ -80,7 +85,7 @@ def get_embedding(text):
     return response['embedding']
 
 def main():
-    print("Setting up database with new hybrid schema...")
+    print("Setting up database with new hybrid schema (with occupation filtering)...")
     conn, cur = setup_database()
 
     with open('schemes.json', 'r', encoding='utf-8') as f:
@@ -88,7 +93,7 @@ def main():
 
     print(f"Starting Smart Ingestion for {len(schemes)} schemes...")
     
-    # For testing, you might want to slice this to `schemes[:5]` so you don't wait an hour!
+    # For initial safety and speed, slice this to `schemes[:10]` to verify parsing outputs!
     for i, scheme in enumerate(schemes, 1):
         scheme_name = scheme.get('scheme_name', '')
         details = scheme.get('details', '')
@@ -102,12 +107,12 @@ def main():
         # Step B: Vector Generation
         vector = get_embedding(text_to_embed)
         
-        # Step C: Hybrid Database Insert
+        # Step C: Hybrid Database Insert (Including the target_professions text array)
         cur.execute("""
             INSERT INTO government_schemes
             (scheme_name, portal_url, details, eligibility_rules, documents_needed,
-             min_age, max_age, max_income, is_differently_abled, is_women_only, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             min_age, max_age, max_income, target_professions, is_differently_abled, is_women_only, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             scheme_name,
             scheme.get('portal_url', ''),
@@ -117,15 +122,16 @@ def main():
             metadata.min_age,
             metadata.max_age,
             metadata.max_income,
+            metadata.target_professions,  # Psycopg2 automatically translates Python lists to SQL arrays
             metadata.is_differently_abled,
             metadata.is_women_only,
             vector
         ))
         
         print(f"[{i}/{len(schemes)}] Ingested: {scheme_name}")
-        print(f"    -> LLM Found: Age:{metadata.min_age}-{metadata.max_age}, Income:<{metadata.max_income}")
+        print(f"    -> LLM Found: Professions: {metadata.target_professions} | Income: <{metadata.max_income}")
 
-    print("✅ All schemes ingested successfully with metadata and embeddings!")
+    print("✅ All schemes ingested successfully with persistent metadata arrays and embeddings!")
     
     cur.close()
     conn.close()
