@@ -10,6 +10,7 @@ The system leverages natural language processing (Hindi/English), document retri
 * **Data Layer:** PostgreSQL with `pgvector` extension (Hybrid RAG)
 * **Intelligence & Inference Engine:** Ollama (Local Node) running `llama3.1` (8B Execution Model) & `nomic-embed-text` (Vector Models)
 * **Testing Infrastructure:** `pytest` (Automated Matrix Harness)
+* **Interface & Messaging Layer:** `discord.py` (Secure asynchronous WebSocket interface managing multi-user DM isolation)
 
 ---
 
@@ -32,6 +33,12 @@ To eliminate semantic blindspots, the backend was migrated to a robust **Hybrid 
 2. **The Semantic Ranking Layer:** Remaining candidate schemes undergo a `pgvector` cosine similarity search (`<=>`) matching user chat intent with multi-dimensional document chunks.
 3. **Contextual Evaluation Engine:** Built an automated testing suite (`test_hybrid_rag.py`) parametrized across 10 distinct, structured citizen personas (e.g., `p1_widowed_farmer`, `p2_rural_student`). The generation routine utilizes a strict system configuration to force total fact synthesis, manage situational sensitivity constraints, and handle `null` financial values cleanly while preserving system performance using proactive thermal throttling.
 
+### Phase 3: Conversational State Machine & Live Runtime Routing
+Transitioned the architecture from a static testing harness to a live, production-ready interactive interface.
+* **13-Step Conversational Onboarding:** Built a progressive state machine inside `bot.py` to sequentially capture and validate comprehensive user profiles (Gender, Caste, Minority Status, BPL records, etc.), eliminating structural data omission gaps.
+* **Dynamic Database Schema Evolution:** Upgraded the PostgreSQL layer via `db.py` to utilize a native `JSONB` data type combined with atomic appends (`||`). Replaced rigid boolean architectures with a flexible `occupation` string identifier to prevent hardcoded keyword constraints.
+* **Discord API Guardrails & Chunking:** Implemented an aggressive streaming chunking algorithm at the presentation layer to split LLM context blocks at newline boundaries if payloads exceed 1,900 characters, bypassing Discord's 2,000-character truncation errors.
+* **Live RAG Context Injection:** Configured the production message loop to dynamically pull the user's explicit profile out of PostgreSQL at runtime based on their unique, unchangeable Snowflake User ID, feeding those verified facts straight into the Llama 3.1 evaluation prompt.
 ---
 
 ##  Repository Structure
@@ -52,6 +59,9 @@ To eliminate semantic blindspots, the backend was migrated to a robust **Hybrid 
   * `user_profile_schema.json`: System design blueprints defining parameters for user object fields.
   * `progress.json`: State-persistence marker for web tracking stability.
   * `requirements.txt`: Master project dependency manifest.
+* **Production Interface Layer:**
+  * `bot.py`: The main runtime gateway managing multi-user asynchronous event loops, DM routing, and the onboarding state machine.
+  * `db.py`: Data persistence module responsible for initializing relational configurations, updating chat states, and merging profile JSONB payloads.
 
 ---
 
@@ -87,3 +97,16 @@ Execute the core testing pipeline to trace data integration from database retrie
 pytest test_hybrid_rag.py -v -s
 ```
 *(Note: A 4-second internal cooldown clock is intentionally enforced at the end of each persona cycle to allow your local CPU core temperatures to return to resting state before computing subsequent embeddings).*
+
+### 6. Launch the Live Bot Interface
+Create a local `.env` file in the root directory and add your secure Discord developer application token:
+```env
+DISCORD_TOKEN=your_bot_token_here
+```
+
+Boot the interface engine to initialize the database tables and establish the secure gateway connection:
+```bash
+py bot.py
+```
+(Once active, users can message the bot via Direct Messages to clear the onboarding state sequence and run live vector-filtering scheme evaluations).
+
