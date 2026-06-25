@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import db
-import hybrid_rag
+from core_inference import hybrid_rag
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -13,6 +13,19 @@ db.init_db()
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# ── WEEK 4: SARVAM AI SPEECH-TO-TEXT GATEWAY ──────────────────────────────────
+def transcrib_voice_payload(audio_bytes) -> str:
+    """
+    Placeholder for your Week 4 Sarvam Saaras STT implementation.
+    Passes raw audio bytes directly into Sarvam endpoints.
+    """
+    # TODO: Connect your Sarvam AI Client initialization here
+    # response = sarvam_client.speech_to_text(audio_bytes, language_code="hi-IN")
+    # return response.text
+    
+    # Mocking returning text string for test query verification:
+    return "I just finished school and need help paying for college fees. Are there any scholarships?"
 
 @bot.event
 async def on_ready():
@@ -35,8 +48,29 @@ async def on_message(message):
     user_record = db.get_or_create_user(user_id, username)
     current_state = user_record['current_state']
     
-    # Helper to clean up inputs
+    # Base input initialization
     text = message.content.strip()
+
+    # ── AUDIO ATTACHMENT INTERCEPTOR ──────────────────────────────────────────
+    if message.attachments:
+        for attachment in message.attachments:
+            # Detect native Discord voice notes or explicit audio uploads
+            if "audio" in str(attachment.content_type) or attachment.filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
+                processing_msg = await message.channel.send("🎙️ *Voice message detected! Transcribing via Sarvam STT...*")
+                try:
+                    # 1. Download raw audio bytes straight from Discord CDN
+                    audio_bytes = await attachment.read()
+                    
+                    # 2. Pass bytes through Sarvam Pipeline
+                    transcribed_text = transcrib_voice_payload(audio_bytes)
+                    
+                    # 3. Seamlessly mutate input parameters to flow directly down into runtime states
+                    text = transcribed_text.strip()
+                    await processing_msg.edit(content=f"📝 *Transcribed:* \"{text}\"")
+                except Exception as audio_err:
+                    await processing_msg.edit(content="❌ Failed to process or transcribe the incoming audio stream.")
+                    print(f"Audio Handshake Exception: {audio_err}")
+                    return
 
     # --- FULL 13-STEP PROFILE STATE MACHINE ---
     
@@ -125,10 +159,8 @@ async def on_message(message):
         return
 
     elif current_state == 'AWAITING_OCCUPATION':
-        # Final step handles wrapping up the object completely
         db.update_user_state(user_id, 'PROFILE_COMPLETE', {'occupation': text})
         
-        # Pull clean copy from database to verify everything saved
         updated_user = db.get_or_create_user(user_id, username)
         d = updated_user['profile_data']
         
@@ -159,31 +191,26 @@ async def on_message(message):
         profile_data = user_record['profile_data']
         
         try:
-            import hybrid_rag
+            from core_inference import hybrid_rag
             ai_response = hybrid_rag.run_yojana_pipeline(profile_data, text)
             
-            # Delete status loading placeholder
             await status_msg.delete()
             
             # SAFE CHUNKING: Break up responses longer than 2000 characters
             if len(ai_response) > 2000:
-                # Split by line breaks so it doesn't cut words in half
                 lines = ai_response.split('\n')
                 current_chunk = ""
                 
                 for line in lines:
-                    # If adding this line exceeds 1900 chars, send the current chunk
                     if len(current_chunk) + len(line) + 1 > 1900:
                         await message.channel.send(current_chunk)
                         current_chunk = line + '\n'
                     else:
                         current_chunk += line + '\n'
                 
-                # Send whatever is left over
                 if current_chunk.strip():
                     await message.channel.send(current_chunk)
             else:
-                # Standard short message transmission
                 await message.channel.send(ai_response)
             
         except Exception as e:
