@@ -1,27 +1,137 @@
 import os
+import sys
+import requests
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from product_inference import db
 import ollama
+from sarvamai import SarvamAI
+import json
+import shutil
 import asyncio
+import re
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+SARVAM_API_KEY = os.getenv('SARVAM_API_KEY')
 
 # Initialize the database layout
 db.init_db()
+
+# Initialize the Sarvam AI SDK Client
+sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# ── LLM LIGHTWEIGHT INTENT ROUTER ─────────────────────────────────────────────
+# Ensure temporary media directory paths exist safely
+os.makedirs("./temp_voice", exist_ok=True)
+
+# ── HELPER: DYNAMIC LANGUAGE DETECTION ────────────────────────────────────────
+def get_tts_language(text: str) -> str:
+    """
+    Scans the text for Devanagari (Hindi) characters. 
+    Routes to Hindi TTS if found, otherwise defaults to Indian English.
+    """
+    if re.search(r'[\u0900-\u097F]', text):
+        return "hi-IN"
+    return "en-IN"
+
+# ── WEEK 4: PRODUCTION SARVAM AI SPEECH-TO-TEXT ENGINE ────────────────────────
+def execute_sarvam_stt(local_file_path: str, user_id: str) -> str:
+    """
+    Concurrency-safe transcription pipeline isolated by user_id.
+    Parses the target JSON asset downloaded from Sarvam.
+    """
+    user_dir = f"./temp_voice/{user_id}"
+    out_dir = os.path.join(user_dir, "output")
+    
+    if os.path.exists(user_dir):
+        shutil.rmtree(user_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    isolated_audio_filename = os.path.basename(local_file_path)
+    isolated_audio_path = os.path.join(user_dir, isolated_audio_filename)
+    shutil.move(local_file_path, isolated_audio_path)
+
+    job = sarvam_client.speech_to_text_job.create_job(
+        model="saaras:v3",
+        mode="transcribe",
+        language_code="unknown",
+        with_diarization=False
+    )
+    
+    job.upload_files(file_paths=[isolated_audio_path])
+    job.start()
+    job.wait_until_complete()
+    job.download_outputs(output_dir=out_dir)
+    
+    for root, dirs, files in os.walk(out_dir):
+        for file in files:
+            if file.endswith('.json'):
+                json_path = os.path.join(root, file)
+                print(f"📁 Found Sarvam JSON transcription asset at: {json_path}")
+                
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                try:
+                    shutil.rmtree(user_dir)
+                except:
+                    pass
+                
+                if isinstance(data, dict):
+                    if "transcript" in data:
+                        return data["transcript"].strip()
+                    if "text" in data:
+                        return data["text"].strip()
+                    if "model_output" in data and "transcript" in data["model_output"]:
+                        return data["model_output"]["transcript"].strip()
+                    if "segments" in data:
+                        return " ".join([seg.get("transcript", seg.get("text", "")) for seg in data["segments"]]).strip()
+                
+                raise KeyError(f"Could not find transcript text key inside Sarvam JSON schema.")
+                
+    try:
+        shutil.rmtree(user_dir)
+    except:
+        pass
+        
+    raise FileNotFoundError("Sarvam STT data pipeline completed, but no json results were found.")
+
+# ── WEEK 4: PRODUCTION SARVAM AI TEXT-TO-SPEECH STREAMER ──────────────────────
+def execute_sarvam_tts(text_payload: str, output_path: str, lang_code: str):
+    """
+    Queries Bulbul V3 streaming transcription matrices over raw HTTP connection pools.
+    Dynamically sets target language based on input text structure.
+    """
+    api_url = "https://api.sarvam.ai/text-to-speech/stream"
+    headers = {
+        "api-subscription-key": SARVAM_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "text": text_payload,
+        "target_language_code": lang_code, 
+        "speaker": "shubh",
+        "model": "bulbul:v3",
+        "pace": 1,
+        "speech_sample_rate": 22050,
+        "output_audio_codec": "mp3",
+        "enable_preprocessing": True
+    }
+    
+    with requests.post(api_url, headers=headers, json=payload, stream=True) as response:
+        response.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+# ── WEEK 4: LLM LIGHTWEIGHT INTENT ROUTER ─────────────────────────────────────
 def classify_user_intent(user_input: str) -> str:
-    """
-    Runs a fast classification inference pass to isolate casual chit-chat
-    from core RAG government database tracking queries.
-    """
     system_instruction = """
     You are a fast semantic classifier system router.
     Analyze the user input text and respond with EXACTLY one word:
@@ -46,7 +156,7 @@ def classify_user_intent(user_input: str) -> str:
 @bot.event
 async def on_ready():
     print(f'==========================================')
-    print(f'🤖 Yojana Mitra Full Profiler Online (Text Mode)')
+    print(f'🤖 Yojana Mitra Full Profiler Online')
     print(f'==========================================')
 
 @bot.event
@@ -64,8 +174,30 @@ async def on_message(message):
     user_record = db.get_or_create_user(user_id, username)
     current_state = user_record['current_state']
     
-    # Helper to clean up inputs
     text = message.content.strip()
+    is_voice_mode = False
+
+    # ── AUDIO ATTACHMENT INTERCEPTOR (THREAD SAFE) ────────────────────────────
+    if message.attachments:
+        for attachment in message.attachments:
+            if "audio" in str(attachment.content_type) or attachment.filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
+                is_voice_mode = True
+                processing_msg = await message.channel.send("🎙️ *Voice message detected! Transcribing via Sarvam STT...*")
+                try:
+                    unique_filename = f"{user_id}_{attachment.filename}"
+                    temp_audio_path = os.path.join("./temp_voice", unique_filename)
+                    await attachment.save(temp_audio_path)
+                    
+                    # RUN IN BACKGROUND THREAD TO PREVENT DISCORD CRASH
+                    transcribed_text = await asyncio.to_thread(execute_sarvam_stt, temp_audio_path, user_id)
+                    
+                    text = transcribed_text.strip()
+                    await processing_msg.edit(content=f"📝 *Transcribed Content:* \"{text}\"")
+                    
+                except Exception as audio_err:
+                    await processing_msg.edit(content="❌ Failed to process or transcribe the incoming audio stream.")
+                    print(f"Audio Handshake Exception: {audio_err}")
+                    return
 
     # --- FULL 13-STEP PROFILE STATE MACHINE ---
     if current_state == 'START':
@@ -180,18 +312,18 @@ async def on_message(message):
 
     # --- ACTIVE CONVERSATION RUNTIME ---
     elif current_state == 'PROFILE_COMPLETE':
-        status_msg = await message.channel.send("🤖 *Yojana Mitra is analyzing your query...*")
+        status_msg = await message.channel.send("🤖 *Yojana Mitra is analyzing the input stream...*")
         profile_data = user_record['profile_data']
         
         try:
-            # RUN CLASSIFIER IN THREAD TO PREVENT DISCONNECTS
+            # RUN CLASSIFIER IN THREAD
             intent = await asyncio.to_thread(classify_user_intent, text)
             
             if intent == 'CHIT_CHAT':
                 await status_msg.edit(content="💬 *Thinking...*")
                 
-                # Dynamic Prompt: Reply in the same language the user typed
-                chat_prompt = "You are Yojana Mitra, a helpful AI assistant. Reply briefly, politely, and naturally. You MUST reply in the exact same language the user typed (e.g., if they typed English, use English. If they typed Hindi/Hinglish, use Hindi/Hinglish)."
+                # Dynamic Prompt: Reply in the same language the user spoke
+                chat_prompt = "You are Yojana Mitra, a helpful AI assistant. Reply briefly, politely, and naturally. You MUST reply in the exact same language the user used (e.g., if they spoke English, use English. If they spoke Hindi/Hinglish, use Hindi/Hinglish)."
                 response = await asyncio.to_thread(
                     ollama.chat,
                     model='llama3.1',
@@ -205,34 +337,52 @@ async def on_message(message):
                 await status_msg.edit(content="🔍 *Searching government scheme matrices...*")
                 from core_inference import hybrid_rag
                 
-                # RUN RAG PIPELINE IN BACKGROUND THREAD TO PREVENT DISCONNECTS
+                # RUN RAG PIPELINE IN BACKGROUND THREAD
                 ai_response = await asyncio.to_thread(hybrid_rag.run_yojana_pipeline, profile_data, text)
             
             await status_msg.delete()
             
-            # SAFE CHUNKING: Break up responses longer than 2000 characters
-            if len(ai_response) > 2000:
-                lines = ai_response.split('\n')
-                current_chunk = ""
-                
-                for line in lines:
-                    if len(current_chunk) + len(line) + 1 > 1900:
-                        await message.channel.send(current_chunk)
-                        current_chunk = line + '\n'
-                    else:
-                        current_chunk += line + '\n'
-                
-                if current_chunk.strip():
-                    await message.channel.send(current_chunk)
+            if is_voice_mode:
+                voice_status = await message.channel.send("🗣️ *Synthesizing voice response audio streams via Sarvam Bulbul...*")
+                try:
+                    out_audio_path = f"./temp_voice/response_{user_id}.mp3"
+                    
+                    # DYNAMICALLY DETECT LANGUAGE FOR TTS
+                    target_lang = get_tts_language(ai_response)
+                    
+                    # RUN TTS STREAM IN BACKGROUND THREAD
+                    await asyncio.to_thread(execute_sarvam_tts, ai_response, out_audio_path, target_lang)
+                    
+                    await voice_status.delete()
+                    await message.channel.send(file=discord.File(out_audio_path))
+                    
+                    if os.path.exists(out_audio_path):
+                        os.remove(out_audio_path)
+                except Exception as tts_err:
+                    await voice_status.edit(content="⚠️ Voice output synthesis faulted. Falling back to clean text delivery alternative.")
+                    print(f"TTS Engine Fault Event: {tts_err}")
+                    await message.channel.send(ai_response)
             else:
-                await message.channel.send(ai_response)
+                if len(ai_response) > 2000:
+                    lines = ai_response.split('\n')
+                    current_chunk = ""
+                    for line in lines:
+                        if len(current_chunk) + len(line) + 1 > 1900:
+                            await message.channel.send(current_chunk)
+                            current_chunk = line + '\n'
+                        else:
+                            current_chunk += line + '\n'
+                    if current_chunk.strip():
+                        await message.channel.send(current_chunk)
+                else:
+                    await message.channel.send(ai_response)
             
         except Exception as e:
             try:
                 await status_msg.delete()
             except:
                 pass
-            await message.channel.send("❌ Operational database exception encountered handling text generation pipelines.")
+            await message.channel.send("❌ Operational exception encountered handling production runtime inference layers.")
             print(f"Runtime Exception Event: {e}")
             
         return
