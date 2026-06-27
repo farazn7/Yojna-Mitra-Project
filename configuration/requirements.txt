@@ -11,3 +11,11 @@ pgvector==0.2.5
 # --- Phase 3: Local LLM & RAG Engine ---
 ollama==0.1.7
 pydantic==2.6.4
+
+# --- Phase 4: Production Interface & Environment ---
+discord.py>=2.3.2
+python-dotenv>=1.0.1
+
+# --- Phase 4: Audio & API Integrations (For bot_audio.py) ---
+sarvamai>=0.1.0
+requests>=2.31.0
