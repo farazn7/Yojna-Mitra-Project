@@ -48,7 +48,7 @@ Transitioned the architecture from a static testing harness into a live, product
 
 ## Repository Structure
 
-\```text
+```text
 Yojna-Mitra-Project/
 │
 ├── core_inference/
@@ -73,7 +73,7 @@ Yojna-Mitra-Project/
 └── configuration/
     ├── user_profile_schema.json
     └── requirements.txt
-\```
+```
 
 ---
 
@@ -81,52 +81,52 @@ Yojna-Mitra-Project/
 
 ### 1. Clone the Repository
 
-\```bash
+```bash
 git clone https://github.com/farazn7/Yojna-Mitra-Project.git
 cd Yojna-Mitra-Project
-\```
+```
 
 ### 2. Install Dependencies
 
-\```bash
+```bash
 pip install -r configuration/requirements.txt
-\```
+```
 
 ### 3. Initialize Local Vector Store (Docker)
 
 Ensure Docker Desktop is active and spin up a PostgreSQL container equipped with pgvector:
 
-\```bash
+```bash
 docker run --name pgvector-db -e POSTGRES_PASSWORD=mysecretpassword -p 5432:5432 -d pgvector/pgvector:pg16
-\```
+```
 
 ### 4. Setup Local Inference (Ollama)
 
 Download and boot Ollama, then fetch your execution models locally:
 
-\```bash
+```bash
 ollama pull llama3.1
 ollama pull nomic-embed-text
-\```
+```
 
 ### 5. Run the Automated Persona Evals
 
 Execute the core testing pipeline to trace data integration from database retrieval to final markdown output generation:
 
-\```bash
+```bash
 pytest testing_&_diagnostics/test_hybrid_rag.py -v -s
-\```
+```
 
 ### 6. Launch the Live Bot Interface
 
 Create a local .env file in the root directory and add your secure Discord developer application token:
 
-\```env
+```env
 DISCORD_TOKEN=your_bot_token_here
-\```
+```
 
 Execute your bot using Python's module flag (-m) from the root workspace directory to ensure relative packages resolve perfectly:
 
-\```bash
+```bash
 python -m product_inference.bot
-\```
+```
