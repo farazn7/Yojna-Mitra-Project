@@ -5,17 +5,21 @@ playwright==1.42.0
 pytest==8.1.1
 
 # --- Phase 3: Database & Vector Storage ---
-psycopg2-binary==2.9.9
+psycopg[binary,pool]>=3.1.18 
 pgvector==0.2.5
 
-# --- Phase 3: Local LLM & RAG Engine ---
+# --- Phase 4: LangGraph State Machine ---
+langgraph>=0.0.30
+langgraph-checkpoint-postgres>=1.0.0
+
+# --- Phase 5: Local LLM & RAG Engine ---
 ollama==0.1.7
 pydantic==2.6.4
 
-# --- Phase 4: Production Interface & Environment ---
+# --- Phase 6: Production Interface & Environment ---
 discord.py>=2.3.2
 python-dotenv>=1.0.1
 
-# --- Phase 4: Audio & API Integrations (For bot_audio.py) ---
+# --- Phase 7: Audio & API Integrations (For bot_audio.py) ---
 sarvamai>=0.1.0
 requests>=2.31.0
