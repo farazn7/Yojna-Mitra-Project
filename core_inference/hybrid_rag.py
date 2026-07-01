@@ -3,15 +3,27 @@ import ollama
 import re
 
 def extract_and_print_thoughts(node_name: str, raw_response: str) -> str:
-    """Extracts <think> tags, prints them to the terminal, and returns clean text."""
+    """Extracts <think> tags, prints them to the terminal immediately, and returns clean text."""
     match = re.search(r'<think>(.*?)</think>', raw_response, flags=re.DOTALL | re.IGNORECASE)
+    
     if match:
         thoughts = match.group(1).strip()
         clean_text = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL | re.IGNORECASE).strip()
-        print(f"\n🧠 [AGENT THOUGHTS: {node_name}]")
-        print(f"\033[90m{thoughts}\033[0m") 
-        print("-" * 50 + "\n")
+        
+        print(f"\n [AGENT THOUGHTS: {node_name}]", flush=True)
+        print(f"\033[90m{thoughts}\033[0m", flush=True) 
+        print("-" * 50 + "\n", flush=True)
+        
+        # SAFE GUARDRAIL: If the model only thought and didn't answer, return a fallback
+        if not clean_text:
+            return "I've analyzed the schemes matching your profile, but I ran out of room to format the response. Could you please try asking your question again?"
+            
         return clean_text
+    
+    # Fallback if no think tags exist but text is empty
+    if not raw_response.strip():
+        return "Namaste. I processed your request but encountered an empty response generation. Let's try that again."
+        
     return raw_response.strip()
 
 def setup_db_connection():
@@ -166,7 +178,7 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
         ],
         options={
             'temperature': 0.1,
-            'num_predict': 600,   
+            'num_predict': 4096,   
             'num_thread': 4
         }
     )

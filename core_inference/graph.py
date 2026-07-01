@@ -14,23 +14,27 @@ import product_inference.db as db
 import core_inference.hybrid_rag as hybrid_rag
 
 def extract_and_print_thoughts(node_name: str, raw_response: str) -> str:
-    """Extracts <think> tags, prints them to the terminal, and returns clean text."""
-    # Search for anything inside <think> and </think> tags
+    """Extracts <think> tags, prints them to the terminal immediately, and returns clean text."""
     match = re.search(r'<think>(.*?)</think>', raw_response, flags=re.DOTALL | re.IGNORECASE)
     
     if match:
         thoughts = match.group(1).strip()
-        # Strip the entire think block out of the text intended for Discord
         clean_text = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL | re.IGNORECASE).strip()
         
-        # Print to terminal with ANSI color codes (Dark Grey text) for a hacker aesthetic
-        print(f"\n [AGENT THOUGHTS: {node_name}]")
-        print(f"\033[90m{thoughts}\033[0m") 
-        print("-" * 50 + "\n")
+        print(f"\n [AGENT THOUGHTS: {node_name}]", flush=True)
+        print(f"\033[90m{thoughts}\033[0m", flush=True) 
+        print("-" * 50 + "\n", flush=True)
         
+        # SAFE GUARDRAIL: If the model only thought and didn't answer, return a fallback
+        if not clean_text:
+            return "I've analyzed the schemes matching your profile, but I ran out of room to format the response. Could you please try asking your question again?"
+            
         return clean_text
     
-    # If no think tags are found, just return the raw text
+    # Fallback if no think tags exist but text is empty
+    if not raw_response.strip():
+        return "Namaste. I processed your request but encountered an empty response generation. Let's try that again."
+        
     return raw_response.strip()
 
 # ==========================================

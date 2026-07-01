@@ -53,6 +53,8 @@ async def on_message(message):
         )
 
         ai_response = graph_output.get("response", "I encountered a processing anomaly. Please retry.")
+        if not ai_response or not ai_response.strip():
+            ai_response = "I processed your request, but the generated response was empty. Please try asking your question again!"
         await status_msg.delete()
 
         # SAFE CHUNKING: Break up responses longer than 2000 characters
