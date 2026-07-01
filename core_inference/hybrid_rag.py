@@ -2,6 +2,18 @@ import psycopg2
 import ollama
 import re
 
+def extract_and_print_thoughts(node_name: str, raw_response: str) -> str:
+    """Extracts <think> tags, prints them to the terminal, and returns clean text."""
+    match = re.search(r'<think>(.*?)</think>', raw_response, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        thoughts = match.group(1).strip()
+        clean_text = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL | re.IGNORECASE).strip()
+        print(f"\n🧠 [AGENT THOUGHTS: {node_name}]")
+        print(f"\033[90m{thoughts}\033[0m") 
+        print("-" * 50 + "\n")
+        return clean_text
+    return raw_response.strip()
+
 def setup_db_connection():
     return psycopg2.connect(
         dbname="postgres", 
@@ -20,12 +32,13 @@ def sanitize_response(response_text, context_urls):
             response_text = response_text.replace(url, "[verified URL not available in provided context]")
     return response_text
 
-def run_yojana_pipeline(profile_data, user_query, top_k=3):
+def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="", top_k=3):
     """
     THE LIVE RUNTIME GATEWAY:
     Processes the user's chat query and database profile metadata 
     through a strict SQL filter, pgvector matching, and structured LLM generation loop.
     """
+    user_query = text
     conn = setup_db_connection()
     cur = conn.cursor()
 
@@ -80,16 +93,18 @@ def run_yojana_pipeline(profile_data, user_query, top_k=3):
         print(f"  {idx}. **{row[0]}** (Distance: {row[4]:.4f}) | URL: <{row[1]}>")
     print("="*70 + "\n")
 
-    # 4. Guard check if no schemes pass
+    # 4. Guard check if no schemes pass (Updated to return tuple)
     if not retrieved_schemes:
-        return "Namaste. Based on your current profile details, I could not find an exact match among the active government schemes. Could you please share more information about your situation?"
+        return "Namaste. Based on your current profile details, I could not find an exact match among the active government schemes. Could you please share more information about your situation?", []
 
     # 5. Build dynamic context blocks and extract verified target URLs
     context_blocks = []
     context_urls = set()
+    schemes_fetched = []
     
     for idx, row in enumerate(retrieved_schemes, 1):
         scheme_name, url, details, eligibility = row[0], row[1], row[2], row[3]
+        schemes_fetched.append(scheme_name)
         if url:
             context_urls.add(url)
         context_blocks.append(
@@ -110,12 +125,24 @@ def run_yojana_pipeline(profile_data, user_query, top_k=3):
     - BPL Card Holder: {profile_data.get('below_poverty_line', False)}
     """
 
-    # 7. Strictly defined System Prompt forcing profile evaluation constraints
+    # 7. Format the Short-Term Memory for Context Continuity
+    history_context = ""
+    if summary:
+        history_context += f"\n--- LONG-TERM SUMMARY ---\n{summary}\n"
+        
+    if conversation_history:
+        history_context += "\n--- RECENT CONVERSATION HISTORY ---\n"
+        for msg in conversation_history:
+            role = "User" if msg["role"] == "user" else "Yojana Mitra"
+            history_context += f"{role}: {msg['content']}\n"
+
+    # 8. Strictly defined System Prompt forcing profile evaluation constraints
     system_prompt = f"""
     You are Yojana Mitra, a helpful WhatsApp AI assistant for Indian citizens.
 
     CRITICAL USER PROFILE FACTS:
     {verified_profile}
+    {history_context}
     
     TASK: Read the user's message, review ALL provided schemes, and recommend the matches.
 
@@ -130,9 +157,9 @@ def run_yojana_pipeline(profile_data, user_query, top_k=3):
     {context_string}
     """
 
-    # 8. Run inference matching the optimized test framework options
+    # 9. Run inference using the exact Qwen 3 model you successfully pulled
     response = ollama.chat(
-        model='llama3.1',
+        model='hf.co/qwen/qwen3-8b-gguf:q4_k_m', # Fixed to lowercase
         messages=[
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': user_query}
@@ -144,5 +171,9 @@ def run_yojana_pipeline(profile_data, user_query, top_k=3):
         }
     )
     
-    final_response = response['message']['content']
-    return sanitize_response(final_response, context_urls)
+    # 10. Extract thoughts, clean, and return the exact tuple
+    raw_response = response['message']['content']
+    final_response = extract_and_print_thoughts("RAG PIPELINE", raw_response)
+    
+    cleaned_response = sanitize_response(final_response, context_urls)
+    return cleaned_response, schemes_fetched

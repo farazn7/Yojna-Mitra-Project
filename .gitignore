@@ -18,3 +18,5 @@ debug_page.html
 
 # Project Data Outputs (Uncomment if you don't want to commit the scraped data)
 # schemes.json
+
+context

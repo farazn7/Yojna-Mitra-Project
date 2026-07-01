@@ -1,52 +1,27 @@
 import os
+import asyncio
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from product_inference import db
-import ollama
-import asyncio
+
+# Import database initializer and compiled LangGraph runtime
+import product_inference.db as db
+from core_inference.graph import graph_app
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-# Initialize the database layout
+# Initialize the profile schema parameters if absent
 db.init_db()
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# ── LLM LIGHTWEIGHT INTENT ROUTER ─────────────────────────────────────────────
-def classify_user_intent(user_input: str) -> str:
-    """
-    Runs a fast classification inference pass to isolate casual chit-chat
-    from core RAG government database tracking queries.
-    """
-    system_instruction = """
-    You are a fast semantic classifier system router.
-    Analyze the user input text and respond with EXACTLY one word:
-    - 'CHIT_CHAT' if the user is saying hello, goodbye, thanking you, or asking casual conversational questions.
-    - 'SCHEME_QUERY' if the user is asking about welfare schemes, scholarships, monetary problems, jobs, or financial assistance.
-    Do not output any punctuation or other text.
-    """
-    try:
-        response = ollama.chat(
-            model='llama3.1',
-            messages=[
-                {'role': 'system', 'content': system_instruction},
-                {'role': 'user', 'content': user_input}
-            ],
-            options={'temperature': 0.0}
-        )
-        classification = response['message']['content'].strip()
-        return "CHIT_CHAT" if "CHIT_CHAT" in classification else "SCHEME_QUERY"
-    except:
-        return "SCHEME_QUERY" 
-
 @bot.event
 async def on_ready():
     print(f'==========================================')
-    print(f'🤖 Yojana Mitra Full Profiler Online (Text Mode)')
+    print(f' Yojana Mitra Powered by LangGraph Active')
     print(f'==========================================')
 
 @bot.event
@@ -54,187 +29,55 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
+    # Enforce safe direct messaging parameters
     if not isinstance(message.channel, discord.DMChannel):
         await message.channel.send(f"Hi {message.author.mention}, please DM me directly to securely check eligibility!")
         return
 
     user_id = str(message.author.id)
-    username = message.author.name
-    
-    user_record = db.get_or_create_user(user_id, username)
-    current_state = user_record['current_state']
-    
-    # Helper to clean up inputs
-    text = message.content.strip()
+    text_input = message.content.strip()
 
-    # --- FULL 13-STEP PROFILE STATE MACHINE ---
-    if current_state == 'START':
-        await message.channel.send(
-            f"Hello {message.author.name}! Let's build your profile for Yojana Mitra. 🇮🇳\n\n"
-            "**Step 1:** What is your **Gender**? (e.g., Male, Female, Other)"
+    status_msg = await message.channel.send(" *Yojana Mitra is processing...*")
+
+    try:
+        # Wrap the state evaluation inside an isolated background thread context to prevent thread locking
+        config = {"configurable": {"thread_id": user_id}}
+        
+        graph_output = await asyncio.to_thread(
+            graph_app.invoke,
+            {
+                "messages": [{"role": "user", "content": text_input}],
+                "user_id": user_id
+            },
+            config=config
         )
-        db.update_user_state(user_id, 'AWAITING_GENDER')
-        return
 
-    elif current_state == 'AWAITING_GENDER':
-        db.update_user_state(user_id, 'AWAITING_AGE', {'gender': text})
-        await message.channel.send("**Step 2:** What is your **Age**? (Numbers only)")
-        return
+        ai_response = graph_output.get("response", "I encountered a processing anomaly. Please retry.")
+        await status_msg.delete()
 
-    elif current_state == 'AWAITING_AGE':
-        if not text.isdigit():
-            await message.channel.send("❌ Please enter a valid number for age:")
-            return
-        db.update_user_state(user_id, 'AWAITING_INCOME', {'age': int(text)})
-        await message.channel.send("**Step 3:** What is your annual family **Income** in INR? (Numbers only, e.g., 45000)")
-        return
-
-    elif current_state == 'AWAITING_INCOME':
-        if not text.isdigit():
-            await message.channel.send("❌ Please enter a valid number for income:")
-            return
-        db.update_user_state(user_id, 'AWAITING_CASTE', {'income': int(text)})
-        await message.channel.send("**Step 4:** What is your **Caste** category? (e.g., General, OBC, SC, ST)")
-        return
-
-    elif current_state == 'AWAITING_CASTE':
-        db.update_user_state(user_id, 'AWAITING_RESIDENCE', {'caste': text})
-        await message.channel.send("**Step 5:** What is your area of **Residence**? (Rural / Urban)")
-        return
-
-    elif current_state == 'AWAITING_RESIDENCE':
-        db.update_user_state(user_id, 'AWAITING_MARITAL', {'residence': text})
-        await message.channel.send("**Step 6:** What is your **Marital Status**? (e.g., Single, Married, Widowed, Divorced)")
-        return
-
-    elif current_state == 'AWAITING_MARITAL':
-        db.update_user_state(user_id, 'AWAITING_DISABLED', {'marital_status': text})
-        await message.channel.send("**Step 7:** Are you **Differently Abled**? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_DISABLED':
-        is_disabled = text.lower() in ['yes', 'y', 'true']
-        if is_disabled:
-            db.update_user_state(user_id, 'AWAITING_DISABILITY_PERC', {'differently_abled': True})
-            await message.channel.send("**Step 7b:** What is your **Disability Percentage**? (Enter number, or type 'None')")
-        else:
-            db.update_user_state(user_id, 'AWAITING_MINORITY', {'differently_abled': False, 'disability_percentage': None})
-            await message.channel.send("**Step 8:** Do you belong to a **Minority** community? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_DISABILITY_PERC':
-        perc = int(text) if text.isdigit() else None
-        db.update_user_state(user_id, 'AWAITING_MINORITY', {'disability_percentage': perc})
-        await message.channel.send("**Step 8:** Do you belong to a **Minority** community? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_MINORITY':
-        is_minority = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_BPL', {'minority': is_minority})
-        await message.channel.send("**Step 9:** Do you possess a **Below Poverty Line (BPL)** card? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_BPL':
-        is_bpl = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_DISTRESS', {'below_poverty_line': is_bpl})
-        await message.channel.send("**Step 10:** Are you facing **Economic Distress**? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_DISTRESS':
-        is_distress = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_GOVT_EMP', {'economic_distress': is_distress})
-        await message.channel.send("**Step 11:** Are you a **Government Employee**? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_GOVT_EMP':
-        is_govt = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_OCCUPATION', {'government_employee': is_govt})
-        await message.channel.send("**Step 12:** What is your primary **Occupation**? (e.g., Farmer, Student, Artisan, Unemployed)")
-        return
-
-    elif current_state == 'AWAITING_OCCUPATION':
-        db.update_user_state(user_id, 'PROFILE_COMPLETE', {'occupation': text})
-        
-        updated_user = db.get_or_create_user(user_id, username)
-        d = updated_user['profile_data']
-        
-        summary = (
-            "🎉 **Yojana Mitra Profile Created Successfully!**\n"
-            "The following structure is safely synced to PostgreSQL:\n\n"
-            f"• **Gender:** {d.get('gender')}\n"
-            f"• **Age:** {d.get('age')} years\n"
-            f"• **Income:** ₹{d.get('income'):,}\n"
-            f"• **Caste:** {d.get('caste')}\n"
-            f"• **Residence:** {d.get('residence')}\n"
-            f"• **Marital Status:** {d.get('marital_status')}\n"
-            f"• **Differently Abled:** {d.get('differently_abled')} (Perc: {d.get('disability_percentage')}%)\n"
-            f"• **Minority:** {d.get('minority')}\n"
-            f"• **BPL Status:** {d.get('below_poverty_line')}\n"
-            f"• **Economic Distress:** {d.get('economic_distress')}\n"
-            f"• **Govt Employee:** {d.get('government_employee')}\n"
-            f"• **Occupation:** {d.get('occupation')}\n\n"
-            "You are all set. Type any question now to search matching schemes!"
-        )
-        await message.channel.send(summary)
-        return
-
-    # --- ACTIVE CONVERSATION RUNTIME ---
-    elif current_state == 'PROFILE_COMPLETE':
-        status_msg = await message.channel.send("🤖 *Yojana Mitra is analyzing your query...*")
-        profile_data = user_record['profile_data']
-        
-        try:
-            # RUN CLASSIFIER IN THREAD TO PREVENT DISCONNECTS
-            intent = await asyncio.to_thread(classify_user_intent, text)
+        # SAFE CHUNKING: Break up responses longer than 2000 characters
+        if len(ai_response) > 2000:
+            lines = ai_response.split('\n')
+            current_chunk = ""
             
-            if intent == 'CHIT_CHAT':
-                await status_msg.edit(content="💬 *Thinking...*")
-                
-                # Dynamic Prompt: Reply in the same language the user typed
-                chat_prompt = "You are Yojana Mitra, a helpful AI assistant. Reply briefly, politely, and naturally. You MUST reply in the exact same language the user typed (e.g., if they typed English, use English. If they typed Hindi/Hinglish, use Hindi/Hinglish)."
-                response = await asyncio.to_thread(
-                    ollama.chat,
-                    model='llama3.1',
-                    messages=[
-                        {'role': 'system', 'content': chat_prompt},
-                        {'role': 'user', 'content': text}
-                    ]
-                )
-                ai_response = response['message']['content']
-            else:
-                await status_msg.edit(content="🔍 *Searching government scheme matrices...*")
-                from core_inference import hybrid_rag
-                
-                # RUN RAG PIPELINE IN BACKGROUND THREAD TO PREVENT DISCONNECTS
-                ai_response = await asyncio.to_thread(hybrid_rag.run_yojana_pipeline, profile_data, text)
-            
-            await status_msg.delete()
-            
-            # SAFE CHUNKING: Break up responses longer than 2000 characters
-            if len(ai_response) > 2000:
-                lines = ai_response.split('\n')
-                current_chunk = ""
-                
-                for line in lines:
-                    if len(current_chunk) + len(line) + 1 > 1900:
-                        await message.channel.send(current_chunk)
-                        current_chunk = line + '\n'
-                    else:
-                        current_chunk += line + '\n'
-                
-                if current_chunk.strip():
+            for line in lines:
+                if len(current_chunk) + len(line) + 1 > 1900:
                     await message.channel.send(current_chunk)
-            else:
-                await message.channel.send(ai_response)
+                    current_chunk = line + '\n'
+                else:
+                    current_chunk += line + '\n'
             
-        except Exception as e:
-            try:
-                await status_msg.delete()
-            except:
-                pass
-            await message.channel.send("❌ Operational database exception encountered handling text generation pipelines.")
-            print(f"Runtime Exception Event: {e}")
-            
-        return
+            if current_chunk.strip():
+                await message.channel.send(current_chunk)
+        else:
+            await message.channel.send(ai_response)
+
+    except Exception as e:
+        try:
+            await status_msg.delete()
+        except:
+            pass
+        await message.channel.send(" Operational database exception encountered handling text generation pipelines.")
+        print(f"Runtime Exception Event: {e}")
 
 bot.run(TOKEN)
