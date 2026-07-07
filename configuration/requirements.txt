@@ -26,6 +26,5 @@ requests>=2.31.0
 
 # --- Phase 8: Document Handling, Image Processing & OCR ---
 PyMuPDF>=1.24.0
-pytesseract>=0.3.10
 pdf2image>=1.17.0
 Pillow>=10.0.0

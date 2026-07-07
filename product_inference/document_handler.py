@@ -3,6 +3,7 @@ import struct
 import io
 import discord
 from PIL import Image
+import time
 
 TEMP_DIR = "./temp_documents"
 # Automatically create the folder if it doesn't exist
@@ -53,8 +54,8 @@ def sanitize_for_govt_portal(file_path: str) -> str:
         
     img = Image.open(file_path)
     
-    # 1. Strip Alpha Channel (Convert to pure RGB)
-    if img.mode in ('RGBA', 'P'):
+    # 1. Convert to pure RGB (strip alpha channel, CMYK, Palette, etc.)
+    if img.mode != 'RGB':
         img = img.convert('RGB')
         
     # 2. Create a brand new image to permanently destroy EXIF metadata
@@ -93,15 +94,21 @@ def sanitize_for_govt_portal(file_path: str) -> str:
         
     return new_file_path
 
-async def download_and_process(attachment: discord.Attachment, user_id: str) -> tuple[bool, str]:
-    """The Main Orchestrator: Downloads, verifies, and sanitizes."""
+async def download_and_process(attachment: discord.Attachment, user_id: str, sanitize_for_portal: bool = False) -> tuple[bool, str]:
+    """The Main Orchestrator: Downloads, verifies, and optionally sanitizes for govt portal upload.
+    
+    By default (sanitize_for_portal=False), keeps the crisp high-res original image for AI Vision extraction.
+    When sanitize_for_portal=True, strips EXIF and compresses to 20-100KB JPG for strict govt portals.
+    """
     # Run Layer 1
     is_valid, error_msg = validate_attachment(attachment)
     if not is_valid:
         return False, error_msg
         
     ext = os.path.splitext(attachment.filename)[1].lower()
-    temp_file_path = os.path.join(TEMP_DIR, f"{user_id}_raw{ext}")
+    # Create a unique timestamp so files never overwrite each other
+    timestamp = int(time.time())
+    temp_file_path = os.path.join(TEMP_DIR, f"{user_id}_{timestamp}_raw{ext}")
     
     try:
         # Actually download the file from Discord
@@ -112,9 +119,12 @@ async def download_and_process(attachment: discord.Attachment, user_id: str) -> 
             os.remove(temp_file_path)
             return False, "❌ File integrity check failed. The file appears to be corrupted or disguised."
             
-        # Run Layer 3
-        final_path = sanitize_for_govt_portal(temp_file_path)
-        return True, final_path
+        # Run Layer 3 ONLY if explicitly requested for govt portal upload
+        if sanitize_for_portal:
+            final_path = sanitize_for_govt_portal(temp_file_path)
+            return True, final_path
+            
+        return True, temp_file_path
         
     except Exception as e:
         if os.path.exists(temp_file_path):
