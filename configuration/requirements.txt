@@ -1,5 +1,5 @@
 # --- Phase 1: Web Scraping & Automation ---
-playwright==1.42.0
+playwright>=1.48.0
 
 # --- Phase 2: Testing Framework ---
 pytest==8.1.1
@@ -14,7 +14,7 @@ langgraph-checkpoint-postgres>=1.0.0
 
 # --- Phase 5: Local LLM & RAG Engine ---
 ollama==0.1.7
-pydantic==2.6.4
+pydantic>=2.7.0
 
 # --- Phase 6: Production Interface & Environment ---
 discord.py>=2.3.2
@@ -23,3 +23,9 @@ python-dotenv>=1.0.1
 # --- Phase 7: Audio & API Integrations (For bot_audio.py) ---
 sarvamai>=0.1.0
 requests>=2.31.0
+
+# --- Phase 8: Document Handling, Image Processing & OCR ---
+PyMuPDF>=1.24.0
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+Pillow>=10.0.0

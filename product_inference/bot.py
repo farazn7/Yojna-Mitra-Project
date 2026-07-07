@@ -35,8 +35,33 @@ async def on_message(message):
         return
 
     user_id = str(message.author.id)
-    text_input = message.content.strip()
 
+    # ---------------------------------------------------------
+    # NEW CODE: THE DOCUMENT INTERCEPTOR
+    # ---------------------------------------------------------
+    if message.attachments:
+        for attachment in message.attachments:
+            if attachment.filename.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg')):
+                processing_msg = await message.channel.send("📄 *Document detected! Securing and crushing file size...*")
+                
+                # Import the Bouncer we just built
+                from product_inference.document_handler import download_and_process
+                
+                # Hand it to the Bouncer
+                success, result = await download_and_process(attachment, user_id)
+                
+                if success:
+                    await processing_msg.edit(content=f"**Document Secured!** Saved safely as: `{result}`")
+                    # Next Step: Run OCR and inject text into LangGraph here
+                else:
+                    await processing_msg.edit(content=result)
+                
+                # CRITICAL: Stop the function here so LangGraph doesn't process a blank text message
+                return 
+    # ---------------------------------------------------------
+
+    # If it wasn't an attachment, proceed to LangGraph text processing
+    text_input = message.content.strip()
     status_msg = await message.channel.send(" *Yojana Mitra is processing...*")
 
     try:

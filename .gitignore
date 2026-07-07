@@ -20,3 +20,6 @@ debug_page.html
 # schemes.json
 
 context
+
+# Temporary Document Downloads
+temp_documents/
