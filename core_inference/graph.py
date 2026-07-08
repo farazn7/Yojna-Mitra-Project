@@ -46,9 +46,15 @@ class ConversationState(TypedDict):
     onboarding_step: str                     # Tracks current onboarding state
     user_profile: dict                       # Flat JSONB profile data from DB
     last_discussed_schemes: list             # Persists listed scheme names for indexing
-    current_intent: str                      # CHIT_CHAT | SCHEME_QUERY | PROFILE_UPDATE
+    current_intent: str                      # CHIT_CHAT | SCHEME_QUERY | PROFILE_UPDATE | DOC_RECEIVED | APPLY_SCHEME
     user_id: str                             # Discord Snowflake ID
     response: str                            # Final message to pass back to Discord
+    # ── NEW: Document Collection State ──
+    target_scheme: str                       # Name of scheme user wants to apply for
+    pending_documents: list                  # ["aadhaar", "income_certificate", "land_record"]
+    collected_documents: list                # ["aadhaar"] — docs already in vault
+    awaiting_document: str                   # "income_certificate" — what we're waiting for RIGHT NOW
+    vault_snapshot: dict                     # Latest canonical_data from pii_vault
 
 # ==========================================
 # 2. GRAPH NODES (WORKERS)
@@ -211,7 +217,25 @@ def classify_intent(state: ConversationState) -> dict:
     if not state["messages"]:
         return {"current_intent": "CHIT_CHAT"}
         
-    latest_query = state["messages"][-1].content
+    latest_query = state["messages"][-1].content.strip()
+
+    # Fast-track check for synthetic document reception signal from bot.py
+    if latest_query.startswith("[DOC_RECEIVED:"):
+        return {"current_intent": "DOC_RECEIVED"}
+
+    # Fast-track check for application initiation intent
+    if re.search(r'\b(apply|application|register|avail|fill form|start applying)\b', latest_query, re.IGNORECASE):
+        target = ""
+        last_schemes = state.get("last_discussed_schemes", [])
+        if last_schemes:
+            for scheme in last_schemes:
+                s_name = scheme if isinstance(scheme, str) else str(scheme)
+                if s_name.lower() in latest_query.lower() or len(last_schemes) == 1:
+                    target = s_name
+                    break
+            if not target and last_schemes:
+                target = last_schemes[0] if isinstance(last_schemes[0], str) else str(last_schemes[0])
+        return {"current_intent": "APPLY_SCHEME", "target_scheme": target}
 
     system_prompt = (
         "You are the routing brain of Yojana Mitra, an assistant for Indian welfare programs.\n"
@@ -232,11 +256,10 @@ def classify_intent(state: ConversationState) -> dict:
             options={"temperature": 0.0}  # Lock down deterministic classification
         )
         raw_output = response['message']['content']
-        # Extract the thoughts, print them to the terminal, and get the clean intent word!
         cleaned_output = extract_and_print_thoughts("INTENT CLASSIFIER", raw_output)
         
         predicted_intent = cleaned_output.strip().upper()
-        if predicted_intent not in ["SCHEME_QUERY", "PROFILE_UPDATE", "CHIT_CHAT"]:
+        if predicted_intent not in ["SCHEME_QUERY", "PROFILE_UPDATE", "CHIT_CHAT", "DOC_RECEIVED", "APPLY_SCHEME"]:
             predicted_intent = "SCHEME_QUERY"
     except Exception as e:
         print(f"[Graph Error] Intent classification step failed: {e}")
@@ -391,6 +414,74 @@ def handle_profile_update(state: ConversationState) -> dict:
         return {"response": "I couldn't process that update structural pattern. Could you try specifying it differently?"}
 
 
+def request_next_document(state: ConversationState) -> dict:
+    """HITL gatekeeper: checks vault, updates collected list, asks for next missing doc."""
+    user_id = state["user_id"]
+    pending = list(state.get("pending_documents", []))
+    collected = list(state.get("collected_documents", []))
+    target_scheme = state.get("target_scheme", "")
+    
+    # If first time asking for docs for this scheme (pending is empty):
+    manual_docs = []
+    if not pending and target_scheme:
+        raw_docs_text = db.get_scheme_documents_needed(target_scheme)
+        from core_inference.doc_requirements import parse_required_documents
+        parsed = parse_required_documents(raw_docs_text, target_scheme)
+        pending = parsed.get("scannable", ["aadhaar"])
+        manual_docs = parsed.get("manual", [])
+    
+    # Check which pending docs are already in the vault
+    for doc_type in pending:
+        if doc_type not in collected:
+            cached = db.check_vault_cache(user_id, doc_type)
+            if cached:
+                collected.append(doc_type)
+    
+    # Find next uncollected document
+    next_doc = None
+    for doc_type in pending:
+        if doc_type not in collected:
+            next_doc = doc_type
+            break
+            
+    vault_data = db.get_vault_data(user_id) or {}
+    
+    if next_doc is None:
+        # ALL DOCS COLLECTED — proceed to application
+        return {
+            "pending_documents": pending,
+            "collected_documents": collected,
+            "awaiting_document": "",
+            "vault_snapshot": vault_data,
+            "response": (
+                f"✅ **All required documents collected for {target_scheme or 'your scheme'}!**\n\n"
+                f"I have secured and verified all your PII and document files in your isolated Vault directory (`temp_documents/{user_id}/`).\n"
+                "Your details are ready for automated form submission via the official government portal. Shall I initiate the application filling now?"
+            )
+        }
+        
+    doc_label = next_doc.replace("_", " ").title()
+    progress = f"({len(collected)}/{len(pending)} collected)"
+    
+    manual_note = ""
+    if manual_docs and len(collected) == 0:
+        manual_list_str = "\n".join([f"• {m}" for m in manual_docs])
+        manual_note = f"\n\n*(Note: You will also need to keep the following offline/manual documents handy during final submission:\n{manual_list_str})*"
+        
+    return {
+        "target_scheme": target_scheme,
+        "pending_documents": pending,
+        "collected_documents": collected,
+        "awaiting_document": next_doc,
+        "vault_snapshot": vault_data,
+        "response": (
+            f"📄 **Document Required for {target_scheme or 'application'} {progress}:**\n\n"
+            f"Please upload a clear photo/scan of your **{doc_label}**.\n"
+            f"Make sure the full document is well-lit and readable so I can verify and secure it in your Vault.{manual_note}"
+        )
+    }
+
+
 def append_response(state: ConversationState) -> dict:
     """Terminal node: Safely passes the response message to the state."""
     ai_msg = {"role": "assistant", "content": state["response"]}
@@ -406,7 +497,9 @@ def check_onboarding(state: ConversationState) -> str:
 
 def route_intent(state: ConversationState) -> str:
     intent = state.get("current_intent", "CHIT_CHAT")
-    if intent == "SCHEME_QUERY":
+    if intent in ["DOC_RECEIVED", "APPLY_SCHEME"]:
+        return "request_next_document"
+    elif intent == "SCHEME_QUERY":
         return "handle_scheme_query"
     elif intent == "PROFILE_UPDATE":
         return "handle_profile_update"
@@ -430,6 +523,7 @@ builder.add_node("classify_intent", classify_intent)
 builder.add_node("handle_chit_chat", handle_chit_chat)
 builder.add_node("handle_scheme_query", handle_scheme_query)
 builder.add_node("handle_profile_update", handle_profile_update)
+builder.add_node("request_next_document", request_next_document)
 builder.add_node("append_response", append_response)
 builder.add_node("summarize_conversation", summarize_conversation)
 
@@ -462,12 +556,14 @@ builder.add_conditional_edges(
     "classify_intent",
     route_intent,
     {
+        "request_next_document": "request_next_document",
         "handle_scheme_query": "handle_scheme_query",
         "handle_profile_update": "handle_profile_update",
         "handle_chit_chat": "handle_chit_chat"
     }
 )
 
+builder.add_edge("request_next_document", "append_response")
 builder.add_edge("handle_scheme_query", "append_response")
 builder.add_edge("handle_profile_update", "append_response")
 builder.add_edge("handle_chit_chat", "append_response")
