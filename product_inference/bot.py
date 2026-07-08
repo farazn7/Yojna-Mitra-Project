@@ -44,37 +44,50 @@ async def on_message(message):
             if attachment.filename.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg')):
                 processing_msg = await message.channel.send("📄 *Document detected! Securing file...*")
                 
-                # Hand it to the Bouncer (keep high-res by default for AI Vision)
+                # Check if LangGraph is waiting for a specific document right now
+                config = {"configurable": {"thread_id": user_id}}
+                try:
+                    graph_state = await asyncio.to_thread(graph_app.get_state, config)
+                    expected_doc = graph_state.values.get("awaiting_document", "") if graph_state and hasattr(graph_state, "values") else ""
+                except Exception as e:
+                    print(f"[Bot State Check Error] Could not fetch graph state: {e}")
+                    expected_doc = ""
+                
+                # Hand it to the Bouncer (keep high-res by default for AI Vision, use smart naming)
                 from product_inference.document_handler import download_and_process
-                success, result = await download_and_process(attachment, user_id, sanitize_for_portal=False)
+                doc_label_for_file = expected_doc if expected_doc else "unsolicited"
+                success, result = await download_and_process(attachment, user_id, sanitize_for_portal=False, doc_type_label=doc_label_for_file)
                 
                 if not success:
                     await processing_msg.edit(content=result)
                     return
 
-                await processing_msg.edit(content="📄 *File secured! Classifying document type...*")
-                
-                from product_inference.document_extractor import classify_document, analyze_document
+                from product_inference.document_extractor import classify_document, verify_document_type, analyze_document
                 import json
                 
-                # PASS 0: Identify what kind of document this is
-                doc_type = await asyncio.to_thread(classify_document, result)
-                
-                # If the classifier returns 'back_of_card', we don't cache-check (it's not
-                # a standalone doc type), we just extract whatever data is on it and merge
-                # it into the vault under its actual doc type later when LangGraph has context.
-                # For now in manual testing mode, we save it as 'back_of_card'.
-                display_label = doc_type.replace("_", " ").title()
-                
-                # CACHE CHECK: Only for known, specific doc types (not back_of_card or unknown)
-                skip_cache_types = {"back_of_card", "unknown"}
-                if doc_type not in skip_cache_types:
-                    cached_data = await asyncio.to_thread(db.check_vault_cache, user_id, doc_type)
-                    if cached_data:
-                        await processing_msg.edit(content=f"✅ **Secure Cache Hit!** I already have your verified **{display_label}** details stored in the PII Vault (expires in 24 hours). No need to re-scan!")
+                # PASS 0: Verify if expected, otherwise classify
+                if expected_doc:
+                    await processing_msg.edit(content=f"🔍 *Verifying if document matches requested **{expected_doc.replace('_', ' ').title()}**...*")
+                    matches, reason_or_type = await asyncio.to_thread(verify_document_type, result, expected_doc)
+                    if not matches:
+                        await processing_msg.edit(content=f"⚠️ I requested your **{expected_doc.replace('_', ' ').title()}**, but this looks like something else.\n*(AI verification: {reason_or_type})*\n\nPlease upload a clear photo of your **{expected_doc.replace('_', ' ').title()}** to continue.")
                         return
+                    doc_type = expected_doc
+                    display_label = doc_type.replace("_", " ").title()
+                else:
+                    await processing_msg.edit(content="📄 *File secured! Classifying document type...*")
+                    doc_type = await asyncio.to_thread(classify_document, result)
+                    display_label = doc_type.replace("_", " ").title()
+                    
+                    # CACHE CHECK: Only for known, specific doc types (not back_of_card or unknown) during unsolicited upload
+                    skip_cache_types = {"back_of_card", "unknown"}
+                    if doc_type not in skip_cache_types:
+                        cached_data = await asyncio.to_thread(db.check_vault_cache, user_id, doc_type)
+                        if cached_data:
+                            await processing_msg.edit(content=f"✅ **Secure Cache Hit!** I already have your verified **{display_label}** details stored in the PII Vault (expires in 24 hours). No need to re-scan!")
+                            return
 
-                await processing_msg.edit(content=f"🔍 *Identified as **{display_label}**. Running AI Vision extraction & validation...*")
+                await processing_msg.edit(content=f"🔍 *Running AI Vision extraction & validation on **{display_label}**...*")
                 
                 # PASS 1 & 2: Targeted extraction, JSON structuring, and regex validation
                 analysis = await asyncio.to_thread(analyze_document, result, doc_type)
@@ -95,11 +108,26 @@ async def on_message(message):
                             ttl_hours=24
                         )
                         
-                        preview = json.dumps(extracted_fields, indent=2)
-                        if len(preview) > 500:
-                            preview = preview[:497] + "..."
-                            
-                        await processing_msg.edit(content=f"✅ **{display_label} Saved to Vault!**\n\n```json\n{preview}\n```\n*This PII is isolated from your main profile and will auto-expire in 24 hours.*")
+                        if expected_doc:
+                            # RESUME LANGGRAPH: The graph was paused waiting for this document!
+                            await processing_msg.edit(content=f"✅ **{display_label} Verified & Saved!** Updating application progress...")
+                            graph_output = await asyncio.to_thread(
+                                graph_app.invoke,
+                                {
+                                    "messages": [{"role": "user", "content": f"[DOC_RECEIVED: {doc_type}]"}],
+                                    "user_id": user_id
+                                },
+                                config=config
+                            )
+                            ai_response = graph_output.get("response", "✅ Document received!")
+                            await processing_msg.edit(content=ai_response)
+                        else:
+                            # Unsolicited upload in manual testing mode
+                            preview = json.dumps(extracted_fields, indent=2)
+                            if len(preview) > 500:
+                                preview = preview[:497] + "..."
+                                
+                            await processing_msg.edit(content=f"✅ **{display_label} Saved to Vault!**\n\n```json\n{preview}\n```\n*This PII is isolated from your main profile and will auto-expire in 24 hours.*")
                     else:
                         # Validation failed on a critical field — tell the user exactly what's wrong
                         errors_str = "\n".join([f"- {err}" for err in analysis["validation_errors"]])

@@ -146,19 +146,13 @@ VALIDATORS = {
 }
 
 def validate_extracted_field(field_name: str, value: any) -> tuple[bool, str]:
-    """Returns (is_valid, cleaned_value_or_error).
-    
-    CRITICAL RULE: Only validate fields that were actually found with a real value.
-    If the LLM returned None, empty string, or whitespace for a field, that just
-    means the field wasn't visible on this document — skip it, don't fail on it.
-    """
-    # Skip validation entirely for missing/empty values
+    """Returns (is_valid, cleaned_value_or_error)."""
     if value is None or str(value).strip() == "":
-        return True, None  # Field absent — not an error, just omit from cleaned data
+        return True, None 
     
     rule = VALIDATORS.get(field_name)
     if not rule:
-        return True, value  # No validation rule -> pass through untouched
+        return True, value 
 
     cleaned = rule["clean"](value)
     if re.match(rule["pattern"], cleaned):
@@ -167,11 +161,7 @@ def validate_extracted_field(field_name: str, value: any) -> tuple[bool, str]:
         return False, f"❌ Invalid {field_name}: '{value}' doesn't match {rule['description']}"
 
 def validate_extracted_data(data: dict, doc_type: str) -> tuple[bool, list[str], dict]:
-    """Validates extracted fields against structural regex rules.
-    
-    Only validates fields that have actual non-empty values.
-    Empty/null fields are silently dropped — they represent 'not visible on this doc'.
-    """
+    """Validates extracted fields against structural regex rules."""
     is_valid = True
     errors = []
     cleaned_data = {}
@@ -179,12 +169,12 @@ def validate_extracted_data(data: dict, doc_type: str) -> tuple[bool, list[str],
     for key, val in data.items():
         field_valid, result = validate_extracted_field(key, val)
         if field_valid:
-            if result is not None:  # Only keep fields with actual values
+            if result is not None: 
                 cleaned_data[key] = result
         else:
             is_valid = False
             errors.append(result)
-            cleaned_data[key] = val  # Keep original even if invalid for inspection
+            cleaned_data[key] = val  
 
     return is_valid, errors, cleaned_data
 
@@ -193,9 +183,7 @@ def validate_extracted_data(data: dict, doc_type: str) -> tuple[bool, list[str],
 # 3. IMAGE PREPARATION HELPER
 # ---------------------------------------------------------------------------
 def _get_image_for_vision(file_path: str) -> tuple[str, bool]:
-    """Helper: If file is a PDF, render page 0 to an image for VLM. Otherwise return as-is.
-    Returns (image_path, is_temporary_render).
-    """
+    """Helper: If file is a PDF, render page 0 to an image for VLM."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext == '.pdf':
         doc = fitz.open(file_path)
@@ -209,7 +197,7 @@ def _get_image_for_vision(file_path: str) -> tuple[str, bool]:
     return file_path, False
 
 # ---------------------------------------------------------------------------
-# 4. PASS 0: DOCUMENT CLASSIFICATION
+# 4. PASS 0: DOCUMENT CLASSIFICATION & VERIFICATION
 # ---------------------------------------------------------------------------
 def classify_document(file_path: str) -> str:
     """Pass 0: Ask Gemma 3 Vision to identify what kind of Indian document this is."""
@@ -238,7 +226,6 @@ def classify_document(file_path: str) -> str:
         )
         label = response['message']['content'].strip().lower()
         
-        # Match against known labels
         known_types = list(EXTRACTION_PROMPTS.keys()) + ['back_of_card']
         for known_type in known_types:
             if known_type in label:
@@ -252,6 +239,38 @@ def classify_document(file_path: str) -> str:
         if is_temp and os.path.exists(img_path):
             os.remove(img_path)
 
+def verify_document_type(file_path: str, expected_type: str) -> tuple[bool, str]:
+    """Binary verification: 'I asked for an aadhaar, is this an aadhaar?'"""
+    print(f"[PASS 0: VERIFY] Checking if document is '{expected_type}'...")
+    img_path, is_temp = _get_image_for_vision(file_path)
+    
+    try:
+        response = ollama.chat(
+            model='gemma3:4b',
+            messages=[{
+                'role': 'user',
+                'content': (
+                    f'I asked the user to upload their {expected_type.replace("_", " ")}. '
+                    f'Look at this image and answer:\n'
+                    f'1. Is this actually a {expected_type.replace("_", " ")}? (YES/NO)\n'
+                    f'2. If NO, what document is this?\n'
+                    f'Reply in format: YES or NO: <actual document type>'
+                ),
+                'images': [img_path]
+            }],
+            options={'temperature': 0.0}
+        )
+        answer = response['message']['content'].strip().upper()
+        
+        if answer.startswith("YES"):
+            print(f"[PASS 0: VERIFY] Match confirmed for '{expected_type}'.")
+            return True, expected_type
+        else:
+            print(f"[PASS 0: VERIFY] Mismatch detected. AI said: {answer}")
+            return False, answer
+    finally:
+        if is_temp and os.path.exists(img_path):
+            os.remove(img_path)
 
 # ---------------------------------------------------------------------------
 # 5. PASS 1: TARGETED EXTRACTION
@@ -286,12 +305,10 @@ def extract_from_pdf(file_path: str, doc_type: str = "unknown") -> str:
         text += page.get_text()
     doc.close()
     
-    # If it has significant digital text, return it directly
     if len(text.strip()) > 50:
         print("[PASS 1: EXTRACT] Digital PDF detected. Using fast text layer extraction.")
         return text.strip()
         
-    # Otherwise it's a scanned PDF -> use Vision
     print("[PASS 1: EXTRACT] Scanned PDF detected. Switching to AI Vision extraction.")
     return extract_with_vision(file_path, doc_type)
 
@@ -363,32 +380,29 @@ Raw Text to process:
 def analyze_document(file_path: str, expected_doc_type: str = None) -> dict:
     """The Complete 3-Pass Document Intelligence Pipeline:
     
-    Pass 0 (Classify): Identifies document type (or verifies against expected_doc_type).
+    Pass 0 (Classify/Verify): Identifies document type or verifies against expected_doc_type.
     Pass 1 (Targeted Extract): Extracts text using document-specific VLM prompts.
     Pass 2 (Structure & Validate): Cleans into JSON via Llama 3.1 and validates ID numbers via Regex.
-    
-    Returns:
-    {
-        "success": bool,
-        "doc_type": str,
-        "extracted_data": dict,
-        "raw_text": str,
-        "is_valid": bool,
-        "validation_errors": list[str]
-    }
     """
     try:
-        # Pass 0: Classify document
-        detected_type = classify_document(file_path)
+        doc_type = "unknown"
         
-        # If LangGraph asked for a specific doc type, verify if it matches
-        doc_type = detected_type
+        # Pass 0: Verify (if LangGraph asked for it) OR Classify (if unsolicited)
         if expected_doc_type and expected_doc_type != "unknown":
-            if detected_type != "unknown" and detected_type != expected_doc_type:
-                print(f"[WARNING] Expected '{expected_doc_type}' but detected '{detected_type}'. Proceeding with detected type.")
-            elif detected_type == "unknown":
-                doc_type = expected_doc_type  # Trust expected type if VLM was unsure
-                
+            matches, reason = verify_document_type(file_path, expected_doc_type)
+            if not matches:
+                return {
+                    "success": False,
+                    "doc_type": "mismatch",
+                    "extracted_data": {},
+                    "raw_text": "",
+                    "is_valid": False,
+                    "validation_errors": [f"Document mismatch. Expected {expected_doc_type.replace('_', ' ')}. AI feedback: {reason}"]
+                }
+            doc_type = expected_doc_type
+        else:
+            doc_type = classify_document(file_path)
+
         # Pass 1: Targeted Extract
         raw_text = extract_text_from_document(file_path, doc_type)
         if raw_text.startswith("❌"):

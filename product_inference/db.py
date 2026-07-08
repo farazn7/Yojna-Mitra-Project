@@ -132,7 +132,7 @@ def get_vault_data(user_id: str) -> dict | None:
     return row['canonical_data'] if row else None
 
 def upsert_vault(user_id: str, document_type: str, extracted_fields: dict, source_meta: dict, ttl_hours: int = 24):
-    """Insert or MERGE new document data into the user's vault row."""
+    """Insert or MERGE new document data into the user's vault row and restart TTL clock."""
     conn = psycopg2.connect(**DB_PARAMS)
     cur = conn.cursor()
     
@@ -143,7 +143,7 @@ def upsert_vault(user_id: str, document_type: str, extracted_fields: dict, sourc
             canonical_data = pii_vault.canonical_data || EXCLUDED.canonical_data,
             source_documents = pii_vault.source_documents || EXCLUDED.source_documents,
             updated_at = NOW(),
-            expires_at = GREATEST(pii_vault.expires_at, EXCLUDED.expires_at)
+            expires_at = EXCLUDED.expires_at
     """, (
         str(user_id),
         json.dumps(extracted_fields),
@@ -167,3 +167,21 @@ def purge_expired_vault() -> int:
     cur.close()
     conn.close()
     return deleted
+
+def get_scheme_documents_needed(scheme_name: str) -> str:
+    """Queries PostgreSQL government_schemes table to fetch exact documents_needed text."""
+    conn = psycopg2.connect(**DB_PARAMS, cursor_factory=RealDictCursor)
+    cur = conn.cursor()
+    
+    # Check exact or ILIKE match
+    cur.execute("""
+        SELECT documents_needed FROM government_schemes
+        WHERE scheme_name ILIKE %s
+        LIMIT 1
+    """, (f"%{scheme_name.strip()}%",))
+    
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    return row['documents_needed'] if row and row.get('documents_needed') else ""
