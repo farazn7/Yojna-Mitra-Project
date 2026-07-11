@@ -62,6 +62,13 @@ Engineered a complete document handling pipeline enabling users to upload Indian
 * **Document-Specific Cache System:** Before invoking any AI model, the pipeline checks `pii_vault` for existing unexpired data of the specific document type (`source_documents ? 'aadhaar'`). Cache hits skip VLM entirely, saving GPU compute and API latency. The `back_of_card` and `unknown` types bypass caching to prevent false positives.
 * **Security Bouncer Pipeline (`document_handler.py`):** Three-layer file security: pre-download size/extension validation, magic byte integrity verification (detecting malware disguised as PDFs/JPGs), and on-demand government portal sanitization (EXIF stripping, PNG→JPG conversion, binary-search JPEG compression to 20–100KB). Portal sanitization is disabled by default to preserve high-res originals for AI Vision accuracy.
 
+### Phase 7 & 7.1: HITL Application Gating, Corrective RAG & Fuzzy Trigram Interceptor (Week 6/7)
+Architected an intelligent Human-in-the-Loop (HITL) application readiness workflow combined with high-precision RAG recommendation filtering:
+* **HITL Document Checklist Gating (`doc_requirements.py` & `graph.py`):** Implemented a stateful document collection loop (`request_next_document`) driven by dynamic database requirements (`db.get_scheme_documents_needed`). Separates scannable identity files (`aadhaar`, `income_certificate`) from offline/manual prerequisites, requesting uploads one-by-one with automatic PII Vault cache resolution and `user_manifest.md` audit trail generation (`temp_documents/{user_id}/`).
+* **Corrective Top-10 Hybrid RAG & 3-Tier Recommendation Engine (`hybrid_rag.py`):** Upgraded retrieval from a naive Top-3 cosine search to a **Top-10 Hybrid Retrieval** combining vector distance (`(embedding <=> %s::vector)`) and keyword string overlap (`difflib.SequenceMatcher / similarity()`). Replaced unstructured LLM generation with a strict **3-Tier Recommendation Format** (`Tier 1: Exact Matches`, `Tier 2: Near-Misses / Actionable Gaps`, `Tier 3: Zero Matches Found`) to completely eliminate recommendation hallucinations and irrelevant scheme pitches.
+* **Fuzzy Trigram Application Interceptor (`db.find_similar_scheme_name`):** Decoupled application initiation from general scheme exploration. When a user asks to apply (`APPLY_SCHEME`) using a non-exact or partial scheme name (e.g., `"apply for Moovalur Ramamirtham Higher Education"`), the system executes a `<1s` PostgreSQL trigram match (`pg_trgm` / word overlap) and prompts a direct Yes/No clarification (`"We found Moovalur Ramamirtham Ammaiyar Ninaivu Marriage Assistance Scheme-1... Did you mean to apply for this?"`) instead of kicking off a multi-minute RAG search.
+* **Pre-Playwright Mandatory Enforcement Gate (`request_next_document`):** Built a hard security gate prior to web form automation (`next_doc is None`). If mandatory portal files were skipped (`skipped_documents`), the system intercepts and enforces upload (`"Mandatory Documents Missing for Portal Submission... Please upload Income Certificate now to proceed!"`), while performing double-check cache validation (`db.check_vault_cache` + `find_document_file` filesystem check) to prevent broken file paths during Playwright execution.
+
 
 ## Repository Structure
 
@@ -69,8 +76,9 @@ Engineered a complete document handling pipeline enabling users to upload Indian
 Yojna-Mitra-Project/
 │
 ├── core_inference/
-│   ├── graph.py
-│   ├── hybrid_rag.py
+│   ├── graph.py                  # LangGraph state graph with checkpointer & conditional routing
+│   ├── hybrid_rag.py             # Top-10 Hybrid RAG + 3-Tier Recommendation pipeline
+│   ├── doc_requirements.py       # Scheme requirements parser (scannable vs manual document separation)
 │   ├── inspect_db.py
 │   └── extract_schema_llm.py
 │
