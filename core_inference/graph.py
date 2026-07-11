@@ -46,14 +46,16 @@ class ConversationState(TypedDict):
     onboarding_step: str                     # Tracks current onboarding state
     user_profile: dict                       # Flat JSONB profile data from DB
     last_discussed_schemes: list             # Persists listed scheme names for indexing
-    current_intent: str                      # CHIT_CHAT | SCHEME_QUERY | PROFILE_UPDATE | DOC_RECEIVED | APPLY_SCHEME
+    current_intent: str                      # CHIT_CHAT | SCHEME_QUERY | PROFILE_UPDATE | DOC_RECEIVED | APPLY_SCHEME | SKIP_DOCUMENT
     user_id: str                             # Discord Snowflake ID
     response: str                            # Final message to pass back to Discord
-    # ── NEW: Document Collection State ──
+    # ── Document Collection State ──
     target_scheme: str                       # Name of scheme user wants to apply for
     pending_documents: list                  # ["aadhaar", "income_certificate", "land_record"]
     collected_documents: list                # ["aadhaar"] — docs already in vault
+    skipped_documents: list                  #  NEW: ["pan_card"] — docs user explicitly skipped
     awaiting_document: str                   # "income_certificate" — what we're waiting for RIGHT NOW
+    user_input_scheme: str                   # Raw scheme input when fuzzy clarifying
     vault_snapshot: dict                     # Latest canonical_data from pii_vault
 
 # ==========================================
@@ -63,15 +65,12 @@ class ConversationState(TypedDict):
 def load_user_profile(state: ConversationState) -> dict:
     """Entry node: Syncs state with the PostgreSQL profile table."""
     user_id = state["user_id"]
-    # Fallback default configuration if database fetch fails
     onboarding_step = "START"
     user_profile = {}
     
     try:
-        # Utilize your existing db entry logic
         user_record = db.get_or_create_user(user_id, "DiscordUser")
         if user_record:
-            # Assuming user_record returns a dict or row mapping columns
             onboarding_step = user_record.get("current_state", "START")
             user_profile = user_record.get("profile_data", {})
     except Exception as e:
@@ -97,7 +96,6 @@ def onboarding_handler(state: ConversationState) -> dict:
     next_step = step
     response_text = ""
 
-    # --- FULL 14-STATE PROFILER MATRIX ---
     if step == "START":
         next_step = "AWAITING_GENDER"
         response_text = "Welcome to Yojana Mitra! Let's get you set up to find matching schemes. 🇮🇳\n\n**Step 1:** What is your **Gender**? (e.g., Male, Female, Other)"
@@ -198,7 +196,6 @@ def onboarding_handler(state: ConversationState) -> dict:
             "You are all set. Type any question now to search matching schemes!"
         )
 
-    # Dual-Write Execution: Keep backend database updated
     import product_inference.db as db
     try:
         db.update_user_state(user_id, next_step, profile)
@@ -223,11 +220,19 @@ def classify_intent(state: ConversationState) -> dict:
     if latest_query.startswith("[DOC_RECEIVED:"):
         return {"current_intent": "DOC_RECEIVED"}
 
+    # Fast-track check if answering YES to scheme clarification
+    if state.get("current_intent") == "CLARIFY_SCHEME_NAME" and latest_query.lower() in ["yes", "y", "yeah", "sure", "ok", "proceed", "start"]:
+        return {"current_intent": "APPLY_SCHEME", "target_scheme": state.get("target_scheme", "")}
+
+    #  NEW: Fast-track check for skip command if we are currently waiting for a document
+    if state.get("awaiting_document") and latest_query.lower() in ["skip", "next", "pass", "i don't have it"]:
+        return {"current_intent": "SKIP_DOCUMENT"}
+
     # Fast-track check for application initiation intent
     if re.search(r'\b(apply|application|register|avail|fill form|start applying)\b', latest_query, re.IGNORECASE):
-        target = ""
+        target = state.get("target_scheme", "")
         last_schemes = state.get("last_discussed_schemes", [])
-        if last_schemes:
+        if not target and last_schemes:
             for scheme in last_schemes:
                 s_name = scheme if isinstance(scheme, str) else str(scheme)
                 if s_name.lower() in latest_query.lower() or len(last_schemes) == 1:
@@ -235,6 +240,17 @@ def classify_intent(state: ConversationState) -> dict:
                     break
             if not target and last_schemes:
                 target = last_schemes[0] if isinstance(last_schemes[0], str) else str(last_schemes[0])
+        
+        if not target:
+            all_db_schemes = db.get_all_scheme_names()
+            for scheme_name in all_db_schemes:
+                if scheme_name.lower() in latest_query.lower() or any(word.lower() in latest_query.lower() for word in scheme_name.split() if len(word) > 5):
+                    target = scheme_name
+                    break
+        if not target:
+            fuzzy_target = db.find_similar_scheme_name(latest_query, threshold=0.25)
+            if fuzzy_target:
+                return {"current_intent": "CLARIFY_SCHEME_NAME", "target_scheme": fuzzy_target, "user_input_scheme": latest_query}
         return {"current_intent": "APPLY_SCHEME", "target_scheme": target}
 
     system_prompt = (
@@ -253,7 +269,7 @@ def classify_intent(state: ConversationState) -> dict:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": latest_query}
             ],
-            options={"temperature": 0.0}  # Lock down deterministic classification
+            options={"temperature": 0.0} 
         )
         raw_output = response['message']['content']
         cleaned_output = extract_and_print_thoughts("INTENT CLASSIFIER", raw_output)
@@ -269,8 +285,6 @@ def classify_intent(state: ConversationState) -> dict:
 
 
 def handle_chit_chat(state: ConversationState) -> dict:
-    """Executes context-aware chitchat using structural profile variables and conversation history."""
-    # Build a descriptive persona overview using the flat DB parameters
     profile = state.get("user_profile", {})
     profile_summary = ", ".join([f"{k}: {v}" for k, v in profile.items()])
     summary = state.get("summary", "")
@@ -283,10 +297,8 @@ def handle_chit_chat(state: ConversationState) -> dict:
         "Respond politely, concisely, and support code-mixed Hinglish naturally if the user initiates it."
     )
 
-    # Reconstruct sliding history payload for Ollama
     ollama_messages = [{"role": "system", "content": system_prompt}]
     for msg in state["messages"]:
-        # Handles LangGraph's dynamic message classes cleanly
         role = "user" if msg.type == "human" else "assistant"
         ollama_messages.append({"role": role, "content": msg.content})
 
@@ -295,7 +307,6 @@ def handle_chit_chat(state: ConversationState) -> dict:
             model='llama3.1',
             messages=ollama_messages
         )
-        # Use the extractor to print thoughts and clean the reply!
         raw_reply = response['message']['content']
         reply = extract_and_print_thoughts("CHIT CHAT", raw_reply)
         
@@ -306,11 +317,9 @@ def handle_chit_chat(state: ConversationState) -> dict:
     return {"response": reply}
 
 def summarize_conversation(state: ConversationState) -> dict:
-    """Condenses old messages into a summary and removes them to save VRAM."""
     summary = state.get("summary", "")
     messages = state.get("messages", [])
 
-    # Keep the last 4 messages for immediate context, summarize the rest
     messages_to_summarize = messages[:-4]
     
     prompt = (
@@ -333,9 +342,8 @@ def summarize_conversation(state: ConversationState) -> dict:
         new_summary = extract_and_print_thoughts("MEMORY SUMMARIZER", raw_summary)
     except Exception as e:
         print(f"[Graph Error] Summarization failed: {e}")
-        new_summary = summary # Fallback to old summary if crash occurs
+        new_summary = summary
 
-    # LangGraph's safe deletion protocol: Return RemoveMessage objects matching the old IDs
     delete_messages = [RemoveMessage(id=m.id) for m in messages_to_summarize]
 
     return {
@@ -344,19 +352,15 @@ def summarize_conversation(state: ConversationState) -> dict:
     }
 
 def handle_scheme_query(state: ConversationState) -> dict:
-    """Interfaces with your production pgvector engine using conversation logs for context continuity."""
     user_query = state["messages"][-1].content
     profile = state.get("user_profile", {})
     
-    # Convert history into a clean sequential structure for your hybrid search engine pipeline
     formatted_history = []
-    for msg in state["messages"][:-1]:  # Exclude current query
+    for msg in state["messages"][:-1]: 
         role = "user" if msg.type == "human" else "assistant"
         formatted_history.append({"role": role, "content": msg.content})
 
     try:
-        # Expecting modification in run_yojana_pipeline to accept history context
-        # and output a tuple containing the textual response and schema identities
         reply_text, schemes_fetched = hybrid_rag.run_yojana_pipeline(
             profile_data=profile, 
             text=user_query,
@@ -369,17 +373,15 @@ def handle_scheme_query(state: ConversationState) -> dict:
 
     return {
         "response": reply_text,
-        "last_discussed_schemes": schemes_fetched  # Cached for sequential index indexing followups
+        "last_discussed_schemes": schemes_fetched 
     }
 
 
 def handle_profile_update(state: ConversationState) -> dict:
-    """Enables direct profile overrides and total tracking resets."""
     user_query = state["messages"][-1].content.lower()
     user_id = state["user_id"]
     profile = dict(state.get("user_profile", {}))
     
-    # Clean structural catch for hard reset commands
     if "start over" in user_query or "reset" in user_query:
         db.update_user_state(user_id, "START", {})
         return {
@@ -388,7 +390,6 @@ def handle_profile_update(state: ConversationState) -> dict:
             "response": "Your saved profile data has been wiped. Let's restart. What is your gender?"
         }
 
-    # Basic programmatic field override fallback handler
     system_prompt = (
         f"Given this JSON profile: {json.dumps(profile)} and this user update request: '{user_query}', "
         "output the modified, complete JSON profile map. Change ONLY fields explicitly specified. "
@@ -401,7 +402,6 @@ def handle_profile_update(state: ConversationState) -> dict:
             messages=[{"role": "user", "content": system_prompt}]
         )
         raw_output = response['message']['content']
-        # Strip out the think tags so json.loads doesn't crash!
         cleaned_output = extract_and_print_thoughts("PROFILE UPDATE", raw_output)
         
         updated_profile = json.loads(cleaned_output.strip())
@@ -415,56 +415,113 @@ def handle_profile_update(state: ConversationState) -> dict:
 
 
 def request_next_document(state: ConversationState) -> dict:
-    """HITL gatekeeper: checks vault, updates collected list, asks for next missing doc."""
+    """ UPDATED: Handles Cache Checks and Skip Logic dynamically."""
     user_id = state["user_id"]
     pending = list(state.get("pending_documents", []))
     collected = list(state.get("collected_documents", []))
+    skipped = list(state.get("skipped_documents", []))
     target_scheme = state.get("target_scheme", "")
+    intent = state.get("current_intent", "")
+    awaiting = state.get("awaiting_document", "")
     
+    # 0. CLARIFY SCHEME NAME LOGIC: If intent is CLARIFY_SCHEME_NAME, ask Yes/No clarification immediately
+    if intent == "CLARIFY_SCHEME_NAME":
+        fuzzy_target = state.get("target_scheme", "")
+        user_input = state.get("user_input_scheme", "")
+        return {
+            "target_scheme": fuzzy_target,
+            "response": (
+                f"🔍 **Scheme Name Clarification**\n\n"
+                f"You asked to apply for: **{user_input or 'your scheme'}**.\n"
+                f"We found **{fuzzy_target}** in our active database.\n\n"
+                f"Would you like to start the document upload checklist for **{fuzzy_target}** right now? *(Type Yes to apply, or No to search for other schemes)*"
+            )
+        }
+
+    # 1. SKIP LOGIC: If intent was SKIP, log it and reset awaiting so we move to next
+    if intent == "SKIP_DOCUMENT" and awaiting:
+        print(f"[SKIP LOGIC] User chose to skip: {awaiting}")
+        if awaiting not in skipped:
+            skipped.append(awaiting)
+        awaiting = ""
+
     # If first time asking for docs for this scheme (pending is empty):
     manual_docs = []
     if not pending and target_scheme:
         raw_docs_text = db.get_scheme_documents_needed(target_scheme)
         from core_inference.doc_requirements import parse_required_documents
-        parsed = parse_required_documents(raw_docs_text, target_scheme)
+        parsed = parse_required_documents(raw_docs_text) 
         pending = parsed.get("scannable", ["aadhaar"])
         manual_docs = parsed.get("manual", [])
     
-    # Check which pending docs are already in the vault
-    for doc_type in pending:
-        if doc_type not in collected:
-            cached = db.check_vault_cache(user_id, doc_type)
-            if cached:
+    # 2. CACHE HIT LOGIC: Check which docs are already in the vault and verified physically on disk
+    from product_inference.document_handler import find_document_file
+    for doc_type in list(pending):
+        if doc_type in skipped or doc_type in collected:
+            if doc_type in collected:
+                file_path = find_document_file(user_id, doc_type)
+                if not file_path:
+                    print(f"[CACHE MISS/EXPIRED ON DISK] {doc_type} record found but file missing on disk. Re-requesting.")
+                    collected.remove(doc_type)
+            continue
+        # Only do DB check if we haven't skipped/collected it
+        cached = db.check_vault_cache(user_id, doc_type)
+        if cached:
+            file_path = find_document_file(user_id, doc_type)
+            if file_path:
+                print(f"[CACHE HIT & VERIFIED] Found {doc_type} in vault and verified on disk. Skipping request.")
                 collected.append(doc_type)
+            else:
+                print(f"[CACHE EXPIRED ON DISK] Found {doc_type} in vault DB but file missing on disk. Re-requesting.")
     
-    # Find next uncollected document
+    # Find next uncollected AND unskipped document
     next_doc = None
     for doc_type in pending:
-        if doc_type not in collected:
+        if doc_type not in collected and doc_type not in skipped:
             next_doc = doc_type
             break
             
     vault_data = db.get_vault_data(user_id) or {}
     
     if next_doc is None:
-        # ALL DOCS COLLECTED — proceed to application
+        # Hard Gate: Ensure NO mandatory documents were skipped before Playwright confirmation
+        if len(skipped) > 0:
+            skipped_labels = ", ".join([s.replace("_", " ").title() for s in skipped])
+            first_missing = skipped[0]
+            # Move skipped back into uncollected state to enforce collection before form submission
+            return {
+                "pending_documents": pending,
+                "collected_documents": collected,
+                "skipped_documents": [], # Reset skipped so user is prompted again
+                "awaiting_document": first_missing,
+                "vault_snapshot": vault_data,
+                "response": (
+                    f"⚠️ **Mandatory Documents Missing for Portal Submission**\n\n"
+                    f"You previously skipped uploading: **{skipped_labels}**.\n"
+                    "The official government portal requires these exact files to complete your application.\n"
+                    f"Please upload a clear photo/scan of your **{first_missing.replace('_', ' ').title()}** now to proceed!"
+                )
+            }
+            
+        # ALL DOCS COLLECTED AND VERIFIED — proceed to application confirmation
         return {
             "pending_documents": pending,
             "collected_documents": collected,
+            "skipped_documents": skipped,
             "awaiting_document": "",
             "vault_snapshot": vault_data,
             "response": (
-                f"✅ **All required documents collected for {target_scheme or 'your scheme'}!**\n\n"
-                f"I have secured and verified all your PII and document files in your isolated Vault directory (`temp_documents/{user_id}/`).\n"
+                f"✅ **All required documents processed for {target_scheme or 'your scheme'}!**\n\n"
+                f"I have secured and verified your files in your isolated Vault directory (`temp_documents/{user_id}/`).\n"
                 "Your details are ready for automated form submission via the official government portal. Shall I initiate the application filling now?"
             )
         }
         
     doc_label = next_doc.replace("_", " ").title()
-    progress = f"({len(collected)}/{len(pending)} collected)"
+    progress = f"({len(collected) + len(skipped)}/{len(pending)} processed)"
     
     manual_note = ""
-    if manual_docs and len(collected) == 0:
+    if manual_docs and (len(collected) + len(skipped)) == 0:
         manual_list_str = "\n".join([f"• {m}" for m in manual_docs])
         manual_note = f"\n\n*(Note: You will also need to keep the following offline/manual documents handy during final submission:\n{manual_list_str})*"
         
@@ -472,18 +529,19 @@ def request_next_document(state: ConversationState) -> dict:
         "target_scheme": target_scheme,
         "pending_documents": pending,
         "collected_documents": collected,
+        "skipped_documents": skipped,
         "awaiting_document": next_doc,
         "vault_snapshot": vault_data,
         "response": (
             f"📄 **Document Required for {target_scheme or 'application'} {progress}:**\n\n"
             f"Please upload a clear photo/scan of your **{doc_label}**.\n"
-            f"Make sure the full document is well-lit and readable so I can verify and secure it in your Vault.{manual_note}"
+            f"Make sure the full document is well-lit and readable so I can verify and secure it in your Vault.\n"
+            f"*(If you don't have it right now, just type 'skip')*{manual_note}"
         )
     }
 
 
 def append_response(state: ConversationState) -> dict:
-    """Terminal node: Safely passes the response message to the state."""
     ai_msg = {"role": "assistant", "content": state["response"]}
     return {"messages": [ai_msg]}
 
@@ -497,7 +555,8 @@ def check_onboarding(state: ConversationState) -> str:
 
 def route_intent(state: ConversationState) -> str:
     intent = state.get("current_intent", "CHIT_CHAT")
-    if intent in ["DOC_RECEIVED", "APPLY_SCHEME"]:
+    #  NEW: Add SKIP_DOCUMENT and CLARIFY_SCHEME_NAME to the array so it routes correctly
+    if intent in ["DOC_RECEIVED", "APPLY_SCHEME", "SKIP_DOCUMENT", "CLARIFY_SCHEME_NAME"]:
         return "request_next_document"
     elif intent == "SCHEME_QUERY":
         return "handle_scheme_query"
@@ -506,10 +565,9 @@ def route_intent(state: ConversationState) -> str:
     return "handle_chit_chat"
 
 def should_summarize(state: ConversationState) -> str:
-    """Evaluates if the memory window has breached the 8-message limit."""
     if len(state["messages"]) > 8:
         return "summarize_conversation"
-    return "__end__"  # Returns standard string to map to LangGraph's END
+    return "__end__"
 
 # ==========================================
 # 4. GRAPH ASSEMBLY & PERSISTENCE COMPILATION
@@ -539,7 +597,6 @@ builder.add_conditional_edges(
     }
 )
 
-# FIXED: Explicit routing path mapping for the summarizer check
 builder.add_conditional_edges(
     "append_response", 
     should_summarize,
@@ -574,17 +631,15 @@ builder.add_edge("handle_chit_chat", "append_response")
 # ==========================================
 DB_CONN_STRING = "postgresql://postgres:mysecretpassword@localhost:5432/postgres"
 
-# Create a persistent connection pool with AUTOCOMMIT ENABLED
 pool = ConnectionPool(
     conninfo=DB_CONN_STRING,
     kwargs={"autocommit": True} 
 )
 
-# Pass the pool directly into the PostgresSaver
 checkpointer = PostgresSaver(pool)
+try:
+    checkpointer.setup()
+except Exception as e:
+    print(f"[Checkpointer Setup Note] Skipping setup check (tables likely already initialized or locked): {e}")
 
-# Safely auto-build state tracking tables inside the database container
-checkpointer.setup()
-
-# Final application run compilation targets
 graph_app = builder.compile(checkpointer=checkpointer)

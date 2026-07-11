@@ -1,5 +1,7 @@
 import psycopg2
 import json
+import difflib
+import re
 from psycopg2.extras import RealDictCursor
 
 # Using the standard configuration for the persistent container
@@ -185,3 +187,79 @@ def get_scheme_documents_needed(scheme_name: str) -> str:
     conn.close()
     
     return row['documents_needed'] if row and row.get('documents_needed') else ""
+
+def get_all_scheme_names() -> list[str]:
+    """Returns a list of all scheme names currently stored in government_schemes."""
+    try:
+        conn = psycopg2.connect(**DB_PARAMS)
+        cur = conn.cursor()
+        cur.execute("SELECT scheme_name FROM government_schemes;")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [r[0] for r in rows if r and r[0]]
+    except Exception as e:
+        print(f"[DB Error] Could not fetch scheme names: {e}")
+        return []
+
+def find_similar_scheme_name(query: str, threshold: float = 0.25) -> str:
+    """Finds the closest matching scheme name from government_schemes using SQL trigram similarity or Python difflib fallback."""
+    if not query or not query.strip():
+        return ""
+    
+    clean_q = query.strip()
+    clean_q = re.sub(r'(?i).*\b(apply for|application for|register for|avail of|help with applying for|applying for|apply to)\s+', '', clean_q).strip(' .?!')
+    if not clean_q:
+        clean_q = query.strip()
+        
+    try:
+        conn = psycopg2.connect(**DB_PARAMS)
+        cur = conn.cursor()
+        try:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+            cur.execute("""
+                SELECT scheme_name, similarity(scheme_name, %s) AS score
+                FROM government_schemes
+                WHERE similarity(scheme_name, %s) > %s
+                   OR scheme_name ILIKE %s
+                ORDER BY score DESC
+                LIMIT 1;
+            """, (clean_q, clean_q, threshold, f"%{clean_q}%"))
+            row = cur.fetchone()
+            if row and row[0]:
+                cur.close()
+                conn.close()
+                return row[0]
+        except Exception:
+            conn.rollback()
+            
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DB Error in find_similar_scheme_name SQL check] {e}")
+        
+    all_schemes = get_all_scheme_names()
+    if not all_schemes:
+        return ""
+        
+    for s in all_schemes:
+        if s.lower() in clean_q.lower() or clean_q.lower() in s.lower():
+            return s
+            
+    matches = difflib.get_close_matches(clean_q, all_schemes, n=1, cutoff=threshold)
+    if matches:
+        return matches[0]
+        
+    q_words = set(w.lower() for w in re.findall(r'\w+', clean_q) if len(w) > 3)
+    best_scheme = ""
+    best_score = 0
+    for s in all_schemes:
+        s_words = set(w.lower() for w in re.findall(r'\w+', s) if len(w) > 3)
+        if q_words and s_words:
+            overlap = len(q_words.intersection(s_words))
+            score = overlap / max(len(q_words), 1)
+            if score > best_score and score >= 0.3:
+                best_score = score
+                best_scheme = s
+                
+    return best_scheme

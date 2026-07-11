@@ -1,6 +1,7 @@
 import psycopg2
 import ollama
 import re
+import difflib
 
 def extract_and_print_thoughts(node_name: str, raw_response: str) -> str:
     """Extracts <think> tags, prints them to the terminal immediately, and returns clean text."""
@@ -44,7 +45,7 @@ def sanitize_response(response_text, context_urls):
             response_text = response_text.replace(url, "[verified URL not available in provided context]")
     return response_text
 
-def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="", top_k=3):
+def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="", top_k=10):
     """
     THE LIVE RUNTIME GATEWAY:
     Processes the user's chat query and database profile metadata 
@@ -96,6 +97,18 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
     cur.close()
     conn.close()
 
+    # Sort retrieved schemes by hybrid score (vector distance + string overlap)
+    scored_schemes = []
+    for row in retrieved_schemes:
+        dist = row[4] if row[4] is not None else 1.0
+        vec_sim = max(0.0, 1.0 - dist)
+        str_sim = difflib.SequenceMatcher(None, user_query.lower(), row[0].lower()).ratio()
+        hybrid_score = (vec_sim * 0.7) + (str_sim * 0.3)
+        scored_schemes.append((hybrid_score, row))
+        
+    scored_schemes.sort(key=lambda x: x[0], reverse=True)
+    retrieved_schemes = [x[1] for x in scored_schemes]
+
     # Terminal Pipeline Diagnostics Log
     print("\n" + "="*70)
     print("🔍 Hybrid Database Filtering Matches:")
@@ -105,7 +118,7 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
         print(f"  {idx}. **{row[0]}** (Distance: {row[4]:.4f}) | URL: <{row[1]}>")
     print("="*70 + "\n")
 
-    # 4. Guard check if no schemes pass (Updated to return tuple)
+    # 4. Guard check if no schemes pass
     if not retrieved_schemes:
         return "Namaste. Based on your current profile details, I could not find an exact match among the active government schemes. Could you please share more information about your situation?", []
 
@@ -120,7 +133,7 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
         if url:
             context_urls.add(url)
         context_blocks.append(
-            f"--- SCHEME {idx} ---\nName: {scheme_name}\nURL: {url}\nDetails: {details}\nEligibility: {eligibility}\n"
+            f"--- CANDIDATE SCHEME {idx} ---\nName: {scheme_name}\nURL: {url}\nDetails: {details}\nEligibility: {eligibility}\n"
         )
     context_string = "\n".join(context_blocks)
 
@@ -150,26 +163,37 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
 
     # 8. Strictly defined System Prompt forcing profile evaluation constraints
     system_prompt = f"""
-    You are Yojana Mitra, a helpful WhatsApp AI assistant for Indian citizens.
+    You are Yojana Mitra, an intelligent welfare scheme advisor for Indian citizens.
 
     CRITICAL USER PROFILE FACTS:
     {verified_profile}
     {history_context}
     
-    TASK: Read the user's message, review ALL provided schemes, and recommend the matches.
+    TASK: Carefully evaluate the CANDIDATE SCHEMES against the user's query and verified profile.
+    Categorize your response strictly using the following 3-TIER RECOMMENDATION FORMAT:
+
+    1. EXACT MATCHES (Tier 1):
+       List only the candidate schemes where the user meets ALL eligibility rules based on their profile.
+       Explain precisely why they qualify and how to apply.
+
+    2. NEAR-MISSES / ACTIONABLE GAPS (Tier 2):
+       List candidate schemes where the user almost qualifies (e.g., family income slightly exceeds limit, or they need a specific certificate like caste/income certificate).
+       Clearly explain the exact gap and what step they can take (e.g., updating income certificate if deductions apply).
+
+    3. NO MATCHES FOUND (Tier 3):
+       If none of the candidates in the list match or come close to what the user needs, clearly state that no exact matches were found right now in the active index.
+       DO NOT hallucinate or invent scheme rules. DO NOT invent facts about the user's demographic profile.
 
     STRICT RULES:
-    1. SYNTHESIZE ALL DATA: You MUST evaluate and discuss ALL the schemes provided in the CONTEXT DATA below. Do not ignore a scheme just because it is at the bottom of the list. Explain how each one can be utilized by the user.
-    2. THE INSENSITIVITY FILTER: You must silently hide schemes that are actively morbid or conflicting with a positive life event. 
-       - Example: If a user is happily pregnant and asking for nutrition/delivery support, DO NOT mention miscarriage or abortion assistance schemes.
-       - Do not apologize for excluding a scheme; just silently drop it.
-    3. NO HALLUCINATIONS: Do not invent URLs, facts, or external schemes. Base your response purely on the provided context.
+    - Only mention candidate schemes from the provided CANDIDATE SCHEMES CONTEXT below.
+    - Do not force-fit or recommend schemes that contradict the user's gender, caste, or age.
+    - Keep your tone supportive, concise, and structured with clear markdown bullet points.
 
-    CONTEXT DATA:
+    CANDIDATE SCHEMES CONTEXT:
     {context_string}
     """
 
-    # 9. Run inference using the exact Qwen 3 model you successfully pulled
+    # 9. Run inference using the exact model
     response = ollama.chat(
         model='hf.co/qwen/qwen3-8b-gguf:q4_k_m', # Fixed to lowercase
         messages=[
@@ -178,7 +202,7 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
         ],
         options={
             'temperature': 0.1,
-            'num_predict': 4096,   
+            'num_predict': 1800,   
             'num_thread': 4
         }
     )
