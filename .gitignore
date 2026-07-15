@@ -23,3 +23,8 @@ context
 
 # Temporary Document Downloads
 temp_documents/
+
+# Isolated Browser Automation Profiles & Screenshots
+browser_profiles/
+screenshots/
+*_final_review.png
