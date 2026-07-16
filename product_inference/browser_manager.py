@@ -216,12 +216,16 @@ def get_session_info(user_id: str) -> Optional[dict[str, Any]]:
 # STANDALONE LOCAL VERIFICATION HARNESS (STEP 1 TESTING)
 # ==============================================================================
 if __name__ == "__main__":
+    import sys
     print("=== Yojana Mitra: Step 1 Browser Session Manager Verification ===")
     test_user = "test_user_001"
 
+    # Check if user passed --headless CLI flag; otherwise default to VISIBLE (headless=False) so you can watch it open!
+    run_headless = "--headless" in sys.argv
+
     # Test 1: Launch persistent profile & verify no race conditions
-    print("\n[Test 1] Launching isolated persistent profile...")
-    ctx, page = launch_isolated_profile(test_user, portal_url="https://example.com", headless=True)
+    print(f"\n[Test 1] Launching isolated persistent profile (headless={run_headless})...")
+    ctx, page = launch_isolated_profile(test_user, portal_url="https://example.com", headless=run_headless)
     info = get_session_info(test_user)
     print(f"  [OK] Profile initialized: {info['profile_dir']}")
     print(f"  [OK] Current URL: {info['current_url']}")
@@ -250,6 +254,12 @@ if __name__ == "__main__":
     new_active = get_active_page(test_user)
     print(f"  [OK] Active page pointer shifted to: {new_active.url}")
     assert new_active.url != initial_url, "Active page pointer did not shift!"
+
+    # Visual pause so you can inspect the open browser window before it closes!
+    if not run_headless:
+        print("\n[Visual Inspection Pause] Browser window is visibly open on your desktop right now!")
+        print("  Keeping window open for 10 seconds so you can see the new tab and verification state...")
+        new_active.wait_for_timeout(10000)
 
     # Clean up
     print("\n[Test 4] Closing session cleanly...")
