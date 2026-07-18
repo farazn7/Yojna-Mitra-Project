@@ -161,6 +161,20 @@ async def on_message(message):
             ai_response = "I processed your request, but the generated response was empty. Please try asking your question again!"
         await status_msg.delete()
 
+        # Check if the automation engine reached a HITL checkpoint or Final Confirmation gate with a screenshot
+        automation_status = graph_output.get("automation_status", "idle")
+        auto_session_id = graph_output.get("automation_session_id", f"auto_{user_id}")
+        
+        discord_file = None
+        if automation_status in ("hitl_paused", "awaiting_confirm"):
+            shot_name = f"{auto_session_id}_final_review.png" if automation_status == "awaiting_confirm" else f"{auto_session_id}_otp_intercept.png"
+            shot_path = os.path.join("screenshots", shot_name)
+            if os.path.exists(shot_path):
+                try:
+                    discord_file = discord.File(shot_path, filename=shot_name)
+                except Exception as e:
+                    print(f"[Screenshot Attachment Note] Could not load image {shot_path}: {e}")
+
         # SAFE CHUNKING: Break up responses longer than 2000 characters
         if len(ai_response) > 2000:
             lines = ai_response.split('\n')
@@ -174,9 +188,15 @@ async def on_message(message):
                     current_chunk += line + '\n'
             
             if current_chunk.strip():
-                await message.channel.send(current_chunk)
+                if discord_file:
+                    await message.channel.send(current_chunk, file=discord_file)
+                else:
+                    await message.channel.send(current_chunk)
         else:
-            await message.channel.send(ai_response)
+            if discord_file:
+                await message.channel.send(ai_response, file=discord_file)
+            else:
+                await message.channel.send(ai_response)
 
     except Exception as e:
         try:

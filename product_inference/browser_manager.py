@@ -29,8 +29,17 @@ Key Features & Architectural Fixes:
 
 import os
 import hashlib
+import concurrent.futures
 from typing import Optional, Callable, Any
 from playwright.sync_api import sync_playwright, BrowserContext, Page, Dialog, Error as PlaywrightError
+
+# Global executor for running synchronous Playwright calls in a clean thread outside any asyncio event loop
+_PW_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="PW_Sync_Worker")
+
+def run_pw(func, *args, **kwargs):
+    """Executes a synchronous Playwright function on a dedicated worker thread where no asyncio event loop is running."""
+    future = _PW_EXECUTOR.submit(func, *args, **kwargs)
+    return future.result()
 
 # Global registry keeping active persistent sessions alive across graph turns
 _SESSION_REGISTRY: dict[str, dict[str, Any]] = {}

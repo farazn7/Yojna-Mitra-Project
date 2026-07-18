@@ -48,8 +48,14 @@ def extract_scheme_details(page, url: str) -> dict | None:
     scheme_data = {
         "scheme_name": "",
         "portal_url": url,
+        "details": "",
+        "benefits": "",
         "eligibility_rules": "",
-        "documents_needed": ""
+        "application_process": "",
+        "documents_needed": "",
+        "application_mode": "unknown",
+        "application_form_url": "",
+        "sources_references": []
     }
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -60,13 +66,48 @@ def extract_scheme_details(page, url: str) -> dict | None:
             raw_title = page.title()
             scheme_data["scheme_name"] = raw_title.replace(" - myScheme", "").strip()
 
+            # 1. Details (#details .markdown-options)
+            details_el = page.locator("#details .markdown-options")
+            if details_el.count() > 0:
+                scheme_data["details"] = details_el.first.inner_text().strip()
+
+            # 2. Benefits (#benefits .markdown-options)
+            benefits_el = page.locator("#benefits .markdown-options")
+            if benefits_el.count() > 0:
+                scheme_data["benefits"] = benefits_el.first.inner_text().strip()
+
+            # 3. Eligibility (#eligibility .markdown-options)
             elig = page.locator("#eligibility .markdown-options")
             if elig.count() > 0:
                 scheme_data["eligibility_rules"] = elig.first.inner_text().strip()
 
+            # 4. Application Process (#application-process .markdown-options)
+            proc = page.locator("#application-process .markdown-options")
+            if proc.count() > 0:
+                scheme_data["application_process"] = proc.first.inner_text().strip()
+
+            # 5. Documents Needed (#documents-required .markdown-options)
             docs = page.locator("#documents-required .markdown-options")
             if docs.count() > 0:
                 scheme_data["documents_needed"] = docs.first.inner_text().strip()
+
+            # 6. Sources And References (#sources a)
+            sources_el = page.locator("#sources a")
+            for i in range(sources_el.count()):
+                link_el = sources_el.nth(i)
+                href = link_el.get_attribute("href")
+                label = link_el.inner_text().strip()
+                if href and label:
+                    scheme_data["sources_references"].append({"label": label, "url": href})
+
+            # Derive application_mode & application_form_url
+            try:
+                from data_extraction.migrate_and_update_schemes import classify_application_mode
+                mode, form_url = classify_application_mode(scheme_data["sources_references"])
+                scheme_data["application_mode"] = mode
+                scheme_data["application_form_url"] = form_url
+            except Exception as e:
+                print(f"        [Scrape Note] Could not classify application mode: {e}")
 
             return scheme_data
 

@@ -57,6 +57,11 @@ class ConversationState(TypedDict):
     awaiting_document: str                   # "income_certificate" — what we're waiting for RIGHT NOW
     user_input_scheme: str                   # Raw scheme input when fuzzy clarifying
     vault_snapshot: dict                     # Latest canonical_data from pii_vault
+    # ── Phase 8 Automation State ──
+    automation_status: str                   # "idle" | "running" | "hitl_paused" | "awaiting_confirm" | "complete" | "error"
+    automation_session_id: str               # Browser session ID
+    application_mode: str                    # "online" | "pdf_form" | "physical_only" | "unknown"
+    application_form_url: str                # Direct URL to form or PDF download
 
 # ==========================================
 # 2. GRAPH NODES (WORKERS)
@@ -219,6 +224,10 @@ def classify_intent(state: ConversationState) -> dict:
     # Fast-track check for synthetic document reception signal from bot.py
     if latest_query.startswith("[DOC_RECEIVED:"):
         return {"current_intent": "DOC_RECEIVED"}
+
+    # Fast-track check if automation is actively running or paused waiting for HITL/Confirmation
+    if state.get("automation_status") in ("hitl_paused", "awaiting_confirm", "running"):
+        return {"current_intent": "AUTOMATION_RESPONSE"}
 
     # Fast-track check if answering YES to scheme clarification
     if state.get("current_intent") == "CLARIFY_SCHEME_NAME" and latest_query.lower() in ["yes", "y", "yeah", "sure", "ok", "proceed", "start"]:
@@ -503,18 +512,14 @@ def request_next_document(state: ConversationState) -> dict:
                 )
             }
             
-        # ALL DOCS COLLECTED AND VERIFIED — proceed to application confirmation
+        # ALL DOCS COLLECTED AND VERIFIED — route directly to launch_automation node!
         return {
             "pending_documents": pending,
             "collected_documents": collected,
             "skipped_documents": skipped,
             "awaiting_document": "",
             "vault_snapshot": vault_data,
-            "response": (
-                f"✅ **All required documents processed for {target_scheme or 'your scheme'}!**\n\n"
-                f"I have secured and verified your files in your isolated Vault directory (`temp_documents/{user_id}/`).\n"
-                "Your details are ready for automated form submission via the official government portal. Shall I initiate the application filling now?"
-            )
+            "current_intent": "LAUNCH_AUTOMATION"
         }
         
     doc_label = next_doc.replace("_", " ").title()
@@ -541,6 +546,212 @@ def request_next_document(state: ConversationState) -> dict:
     }
 
 
+def launch_automation(state: ConversationState) -> dict:
+    """Launches Phase 8 ReAct automation engine or provides physical/PDF guidelines per citizen preference."""
+    target_scheme = state.get("target_scheme", "")
+    user_id = state.get("user_id", "default_user")
+    vault_snapshot = state.get("vault_snapshot")
+    if not vault_snapshot:
+        try:
+            vault_snapshot = db.get_vault_data(user_id) or {}
+        except Exception as e:
+            print(f"[Graph: launch_automation Notice] Could not fetch vault data from PostgreSQL: {e}")
+            vault_snapshot = {}
+
+    # 1. Check scheme application metadata
+    app_info = db.get_scheme_application_info(target_scheme) or {}
+    mode = app_info.get("application_mode", "unknown")
+    form_url = app_info.get("application_form_url", "")
+    portal_url = app_info.get("portal_url", "")
+
+    # If unknown or missing, run targeted on-demand scrape and classification
+    if not mode or mode == "unknown" or not form_url:
+        try:
+            from data_extraction.migrate_and_update_schemes import update_scheme_application_metadata
+            if portal_url:
+                scraped_meta = update_scheme_application_metadata(target_scheme, portal_url)
+                mode = scraped_meta.get("application_mode", "unknown")
+                form_url = scraped_meta.get("application_form_url", "")
+                app_info.update(scraped_meta)
+        except Exception as e:
+            print(f"[Graph: launch_automation Notice] On-demand scrape attempt skipped/failed: {e}")
+
+    print(f"[Graph: launch_automation] Scheme: '{target_scheme}' | Mode: {mode.upper()} | Form URL: {form_url}")
+
+    # 2. Handle non-online modes per citizen preference (no PDF coordinate manipulation scope creep!)
+    if mode == "pdf_form" or (form_url and form_url.lower().endswith(".pdf")):
+        return {
+            "application_mode": "pdf_form",
+            "application_form_url": form_url,
+            "automation_status": "idle",
+            "response": (
+                f"[PDF Form Required] **Physical Submission Required for {target_scheme}**\n\n"
+                "This scheme does not support online application filling. However, your documents and details are securely stored in your Vault.\n\n"
+                f"**Official PDF Application Form:** [Download Form Here]({form_url})\n\n"
+                "Please print out the form, fill it using your verified details, attach your document photocopies, and submit it directly to your local Panchayat/Taluk or designated departmental office."
+            )
+        }
+    elif mode == "physical_only":
+        return {
+            "application_mode": "physical_only",
+            "application_form_url": portal_url,
+            "automation_status": "idle",
+            "response": (
+                f"[Physical Submission Required] **Physical Submission Required for {target_scheme}**\n\n"
+                "This scheme only accepts in-person applications at government offices. No online web portal is available.\n\n"
+                f"**Official Scheme & Process Guidelines:** [View Guidelines]({portal_url})\n\n"
+                "Please visit your nearest e-Sevai Kendra or departmental office with the documents verified in your Yojana Mitra Vault."
+            )
+        }
+
+    # 3. Mode is ONLINE (or fallback with portal URL) → Launch ReAct Automation Graph!
+    target_url = form_url or portal_url
+    if not target_url:
+        return {
+            "automation_status": "error",
+            "response": f"[WARN] Could not locate an active online submission link for '{target_scheme}'."
+        }
+
+    print(f"[Graph: launch_automation] Launching ReAct state machine across target: {target_url}")
+    from product_inference.automation_graph import build_automation_graph
+    auto_graph = build_automation_graph()
+
+    merged_vault = dict(state.get("user_profile", {}))
+    merged_vault.update(vault_snapshot)
+
+    initial_auto_state = {
+        "session_id": f"auto_{user_id}",
+        "portal_url": target_url,
+        "status": "perceiving",
+        "user_vault": merged_vault,
+        "actions_to_execute": [],
+        "unresolved_questions": [],
+        "history": []
+    }
+
+    try:
+        auto_result = auto_graph.invoke(initial_auto_state)
+        new_status = auto_result.get("status", "error")
+        questions = auto_result.get("unresolved_questions", [])
+
+        if new_status == "hitl_intercept":
+            q_text = "\n".join(questions) if questions else "Verification required on the portal."
+            return {
+                "automation_status": "hitl_paused",
+                "automation_session_id": f"auto_{user_id}",
+                "application_mode": mode,
+                "application_form_url": target_url,
+                "response": f"[Portal Intercept] **Portal Intercepted for Human Verification**\n\n{q_text}"
+            }
+        elif new_status == "awaiting_final_confirmation":
+            return {
+                "automation_status": "awaiting_confirm",
+                "automation_session_id": f"auto_{user_id}",
+                "application_mode": mode,
+                "application_form_url": target_url,
+                "response": (
+                    f"[Final Review Gate] **Automated Application Form Filled Up to Final Review Gate!**\n\n"
+                    "In accordance with Citizen Safety Rules, I have halted right before the final submission button.\n"
+                    "Please review the attached portal screenshot carefully to ensure all details match your expectations.\n\n"
+                    "If everything looks correct, reply with **CONFIRM** to execute the final official submission!"
+                )
+            }
+        elif new_status == "form_complete":
+            return {
+                "automation_status": "complete",
+                "automation_session_id": f"auto_{user_id}",
+                "response": f"[SUCCESS] **Application Successfully Submitted!**\n\nYour application for **{target_scheme}** has been completed on the official portal."
+            }
+        else:
+            return {
+                "automation_status": "error",
+                "response": f"[WARN] **Automation Notice:** The portal check resulted in status: `{new_status}`. Please check the portal manually at: {target_url}"
+            }
+    except Exception as e:
+        print(f"[Graph: launch_automation Error] {e}")
+        return {
+            "automation_status": "error",
+            "response": f"[ERROR] **Automation Error:** Encountered an unexpected issue while interacting with the portal: {e}"
+        }
+
+
+def handle_automation_response(state: ConversationState) -> dict:
+    """Handles citizen replies when the automation graph is paused for HITL verification or final CONFIRM."""
+    user_id = state.get("user_id", "default_user")
+    session_id = state.get("automation_session_id", f"auto_{user_id}")
+    status = state.get("automation_status", "idle")
+    latest_msg = state["messages"][-1].content.strip()
+
+    from product_inference.automation_graph import build_automation_graph
+    auto_graph = build_automation_graph()
+
+    # 1. Handle Final Confirmation Gate
+    if status == "awaiting_confirm":
+        if latest_msg.upper() == "CONFIRM":
+            print(f"[Graph: handle_automation_response] Citizen confirmed submission! Executing final button...")
+            from product_inference.browser_manager import get_active_page, run_pw
+            active_page = run_pw(get_active_page, session_id)
+            if active_page and not run_pw(active_page.is_closed):
+                try:
+                    run_pw(active_page.locator("button:has-text('Submit'), input[type='submit'], button:has-text('Confirm')").first.click, timeout=10000)
+                    time.sleep(3)
+                except Exception as e:
+                    print(f"[Confirmation Submit Notice] {e}")
+            return {
+                "automation_status": "complete",
+                "response": "[SUCCESS] **Application Officially Submitted!**\n\nYour confirmation was received and the final submission has been executed."
+            }
+        else:
+            return {
+                "response": "[WARN] **Waiting for Confirmation**\n\nI am currently holding at the Final Review screen. Please reply exactly with **CONFIRM** when you are ready to submit, or type 'cancel' to abort."
+            }
+
+    # 2. Handle HITL Intercept (OTP, Captcha, missing PII answer)
+    if status == "hitl_paused":
+        print(f"[Graph: handle_automation_response] Injecting citizen input '{latest_msg}' into paused session...")
+        merged_vault = dict(state.get("user_profile", {}))
+        merged_vault.update(state.get("vault_snapshot", {}))
+        
+        merged_vault["hitl_input"] = latest_msg
+        if re.match(r'^\d{4,8}$', latest_msg):
+            merged_vault["otp"] = latest_msg
+
+        resume_state = {
+            "session_id": session_id,
+            "portal_url": state.get("application_form_url", ""),
+            "status": "perceiving",
+            "user_vault": merged_vault,
+            "actions_to_execute": [],
+            "unresolved_questions": [],
+            "retries": 0
+        }
+
+        try:
+            auto_result = auto_graph.invoke(resume_state)
+            new_status = auto_result.get("status", "error")
+            questions = auto_result.get("unresolved_questions", [])
+
+            if new_status == "hitl_intercept":
+                q_text = "\n".join(questions) if questions else "Further verification required."
+                return {"automation_status": "hitl_paused", "response": f"[Portal Intercept] **Verification Update**\n\n{q_text}"}
+            elif new_status == "awaiting_final_confirmation":
+                return {
+                    "automation_status": "awaiting_confirm",
+                    "response": (
+                        f"[Final Review Gate] **Form Filled Up to Final Review Gate!**\n\n"
+                        "Please review the portal screenshot carefully. If everything looks correct, reply with **CONFIRM** to execute the final official submission!"
+                    )
+                }
+            elif new_status == "form_complete":
+                return {"automation_status": "complete", "response": "[SUCCESS] **Application Successfully Submitted!**"}
+            else:
+                return {"automation_status": "error", "response": f"[WARN] **Portal Status Update:** `{new_status}`"}
+        except Exception as e:
+            return {"automation_status": "error", "response": f"[ERROR] **Automation Error:** {e}"}
+
+    return {"response": "No active automation session in progress."}
+
+
 def append_response(state: ConversationState) -> dict:
     ai_msg = {"role": "assistant", "content": state["response"]}
     return {"messages": [ai_msg]}
@@ -555,8 +766,11 @@ def check_onboarding(state: ConversationState) -> str:
 
 def route_intent(state: ConversationState) -> str:
     intent = state.get("current_intent", "CHIT_CHAT")
-    #  NEW: Add SKIP_DOCUMENT and CLARIFY_SCHEME_NAME to the array so it routes correctly
-    if intent in ["DOC_RECEIVED", "APPLY_SCHEME", "SKIP_DOCUMENT", "CLARIFY_SCHEME_NAME"]:
+    if intent == "AUTOMATION_RESPONSE":
+        return "handle_automation_response"
+    elif intent == "LAUNCH_AUTOMATION":
+        return "launch_automation"
+    elif intent in ["DOC_RECEIVED", "APPLY_SCHEME", "SKIP_DOCUMENT", "CLARIFY_SCHEME_NAME"]:
         return "request_next_document"
     elif intent == "SCHEME_QUERY":
         return "handle_scheme_query"
@@ -568,6 +782,11 @@ def should_summarize(state: ConversationState) -> str:
     if len(state["messages"]) > 8:
         return "summarize_conversation"
     return "__end__"
+
+def check_document_collection_done(state: ConversationState) -> str:
+    if state.get("current_intent") == "LAUNCH_AUTOMATION":
+        return "launch_automation"
+    return "append_response"
 
 # ==========================================
 # 4. GRAPH ASSEMBLY & PERSISTENCE COMPILATION
@@ -582,6 +801,8 @@ builder.add_node("handle_chit_chat", handle_chit_chat)
 builder.add_node("handle_scheme_query", handle_scheme_query)
 builder.add_node("handle_profile_update", handle_profile_update)
 builder.add_node("request_next_document", request_next_document)
+builder.add_node("launch_automation", launch_automation)
+builder.add_node("handle_automation_response", handle_automation_response)
 builder.add_node("append_response", append_response)
 builder.add_node("summarize_conversation", summarize_conversation)
 
@@ -616,11 +837,23 @@ builder.add_conditional_edges(
         "request_next_document": "request_next_document",
         "handle_scheme_query": "handle_scheme_query",
         "handle_profile_update": "handle_profile_update",
-        "handle_chit_chat": "handle_chit_chat"
+        "handle_chit_chat": "handle_chit_chat",
+        "launch_automation": "launch_automation",
+        "handle_automation_response": "handle_automation_response"
     }
 )
 
-builder.add_edge("request_next_document", "append_response")
+builder.add_conditional_edges(
+    "request_next_document",
+    check_document_collection_done,
+    {
+        "launch_automation": "launch_automation",
+        "append_response": "append_response"
+    }
+)
+
+builder.add_edge("launch_automation", "append_response")
+builder.add_edge("handle_automation_response", "append_response")
 builder.add_edge("handle_scheme_query", "append_response")
 builder.add_edge("handle_profile_update", "append_response")
 builder.add_edge("handle_chit_chat", "append_response")

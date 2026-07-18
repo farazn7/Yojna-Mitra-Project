@@ -257,9 +257,43 @@ def find_similar_scheme_name(query: str, threshold: float = 0.25) -> str:
         s_words = set(w.lower() for w in re.findall(r'\w+', s) if len(w) > 3)
         if q_words and s_words:
             overlap = len(q_words.intersection(s_words))
-            score = overlap / max(len(q_words), 1)
-            if score > best_score and score >= 0.3:
-                best_score = score
-                best_scheme = s
-                
     return best_scheme
+
+
+def get_scheme_application_info(scheme_name: str) -> dict | None:
+    """Fetches application_mode, application_form_url, portal_url, and application_process for a scheme."""
+    try:
+        conn = psycopg2.connect(**DB_PARAMS, cursor_factory=RealDictCursor)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT scheme_name, portal_url, application_mode, application_form_url, application_process
+            FROM government_schemes
+            WHERE LOWER(scheme_name) = LOWER(%s) OR scheme_name ILIKE %s
+            LIMIT 1;
+        """, (scheme_name.strip(), f"%{scheme_name.strip()}%"))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB Error in get_scheme_application_info] {e}")
+        return None
+
+
+def update_scheme_application_info(scheme_name: str, mode: str, form_url: str, process: str):
+    """Updates application_mode, application_form_url, and application_process for a scheme."""
+    try:
+        conn = psycopg2.connect(**DB_PARAMS)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE government_schemes
+            SET application_mode = %s,
+                application_form_url = %s,
+                application_process = %s
+            WHERE LOWER(scheme_name) = LOWER(%s) OR scheme_name ILIKE %s;
+        """, (mode, form_url, process, scheme_name.strip(), f"%{scheme_name.strip()}%"))
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DB Error in update_scheme_application_info] {e}")
