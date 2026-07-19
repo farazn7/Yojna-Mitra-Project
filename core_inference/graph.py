@@ -285,10 +285,10 @@ def classify_intent(state: ConversationState) -> dict:
         
         predicted_intent = cleaned_output.strip().upper()
         if predicted_intent not in ["SCHEME_QUERY", "PROFILE_UPDATE", "CHIT_CHAT", "DOC_RECEIVED", "APPLY_SCHEME"]:
-            predicted_intent = "SCHEME_QUERY"
+            predicted_intent = "CHIT_CHAT"
     except Exception as e:
         print(f"[Graph Error] Intent classification step failed: {e}")
-        predicted_intent = "SCHEME_QUERY"
+        predicted_intent = "CHIT_CHAT"
 
     return {"current_intent": predicted_intent}
 

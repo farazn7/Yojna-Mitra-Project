@@ -45,7 +45,7 @@ def sanitize_response(response_text, context_urls):
             response_text = response_text.replace(url, "[verified URL not available in provided context]")
     return response_text
 
-def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="", top_k=10):
+def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="", top_k=7):
     """
     THE LIVE RUNTIME GATEWAY:
     Processes the user's chat query and database profile metadata 
@@ -138,17 +138,25 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
     context_string = "\n".join(context_blocks)
 
     # 6. Build the dynamic User Profile context explicitly for the LLM
-    verified_profile = f"""
-    - Age: {user_age} years old
-    - Gender: {user_gender}
-    - Occupation: {profile_data.get('occupation', 'None')}
-    - Family Income: ₹{safe_income:,} per annum
-    - Residence: {profile_data.get('residence', 'Unknown')}
-    - Caste Category: {profile_data.get('caste', 'General')}
-    - Minority Status: {profile_data.get('minority', False)}
-    - Marital Status: {profile_data.get('marital_status', 'Single')}
-    - BPL Card Holder: {profile_data.get('below_poverty_line', False)}
-    """
+    verified_profile = ""
+    if profile_data:
+        provided_fields = []
+        if profile_data.get('age'): provided_fields.append(f"    - Age: {profile_data['age']} years old")
+        if profile_data.get('gender'): provided_fields.append(f"    - Gender: {profile_data['gender']}")
+        if profile_data.get('occupation'): provided_fields.append(f"    - Occupation: {profile_data['occupation']}")
+        if profile_data.get('income'): provided_fields.append(f"    - Family Income: ₹{int(profile_data['income']):,} per annum")
+        if profile_data.get('residence'): provided_fields.append(f"    - Residence: {profile_data['residence']}")
+        if profile_data.get('caste'): provided_fields.append(f"    - Caste Category: {profile_data['caste']}")
+        if profile_data.get('minority') is not None: provided_fields.append(f"    - Minority Status: {profile_data['minority']}")
+        if profile_data.get('marital_status'): provided_fields.append(f"    - Marital Status: {profile_data['marital_status']}")
+        if profile_data.get('below_poverty_line') is not None: provided_fields.append(f"    - BPL Card Holder: {profile_data['below_poverty_line']}")
+        
+        if provided_fields:
+            verified_profile = "\n".join(provided_fields)
+        else:
+            verified_profile = "    (No specific profile details provided by the user. Recommend based primarily on their query.)"
+    else:
+        verified_profile = "    (No specific profile details provided by the user. Recommend based primarily on their query.)"
 
     # 7. Format the Short-Term Memory for Context Continuity
     history_context = ""
@@ -166,28 +174,24 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
     You are Yojana Mitra, an intelligent welfare scheme advisor for Indian citizens.
 
     CRITICAL USER PROFILE FACTS:
-    {verified_profile}
-    {history_context}
+{verified_profile}
+{history_context}
     
-    TASK: Carefully evaluate the CANDIDATE SCHEMES against the user's query and verified profile.
-    Categorize your response strictly using the following 3-TIER RECOMMENDATION FORMAT:
+    TASK: Carefully evaluate the CANDIDATE SCHEMES against the user's query and their verified profile.
+    
+    INTERNAL EVALUATION LOGIC:
+    Mentally categorize the candidate schemes into these 3 tiers before you respond:
+    1. EXACT MATCHES: The user meets ALL eligibility rules based on their profile.
+    2. NEAR-MISSES: The user almost qualifies (e.g., they need a specific certificate like caste/income certificate).
+    3. NO MATCHES: None of the candidates match what the user needs.
 
-    1. EXACT MATCHES (Tier 1):
-       List only the candidate schemes where the user meets ALL eligibility rules based on their profile.
-       Explain precisely why they qualify and how to apply.
-
-    2. NEAR-MISSES / ACTIONABLE GAPS (Tier 2):
-       List candidate schemes where the user almost qualifies (e.g., family income slightly exceeds limit, or they need a specific certificate like caste/income certificate).
-       Clearly explain the exact gap and what step they can take (e.g., updating income certificate if deductions apply).
-
-    3. NO MATCHES FOUND (Tier 3):
-       If none of the candidates in the list match or come close to what the user needs, clearly state that no exact matches were found right now in the active index.
-       DO NOT hallucinate or invent scheme rules. DO NOT invent facts about the user's demographic profile.
-
-    STRICT RULES:
-    - Only mention candidate schemes from the provided CANDIDATE SCHEMES CONTEXT below.
-    - Do not force-fit or recommend schemes that contradict the user's gender, caste, or age.
-    - Keep your tone supportive, concise, and structured with clear markdown bullet points.
+    STRICT OUTPUT FORMAT RULES:
+    - Recommend ONLY the most relevant schemes from the CANDIDATE SCHEMES CONTEXT below. Do NOT invent or hallucinate schemes.
+    - DO NOT output the internal tier labels like "Tier 1", "EXACT MATCHES", or "NO MATCHES". You must format your response as a warm, natural, and seamless conversation.
+    - If a scheme is an exact match, briefly explain why they qualify and how to apply.
+    - If they almost qualify for a scheme but need a specific certificate or slightly different criteria, gently mention it as an option they can work towards.
+    - Keep your tone supportive, concise, and structured with clear markdown bullet points. Do not write a long essay.
+    - DO NOT output your internal reasoning or thoughts. Provide the final response directly to the user.
 
     CANDIDATE SCHEMES CONTEXT:
     {context_string}
@@ -202,7 +206,7 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
         ],
         options={
             'temperature': 0.1,
-            'num_predict': 1800,   
+            'num_predict': 800,   
             'num_thread': 4
         }
     )
