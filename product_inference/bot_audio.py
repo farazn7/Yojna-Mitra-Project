@@ -1,390 +1,440 @@
+"""
+bot_audio.py — Optional audio-enabled runner for BOTH Discord and Telegram.
+
+Run this INSTEAD of bot.py + bot_telegram.py when you want Sarvam voice support.
+When you don't want to spend Sarvam credits, just run the regular bots.
+
+Usage:
+    python -m product_inference.bot_audio
+"""
+
 import os
-import sys
+import asyncio
+import threading
+import time
+import urllib.request
+import shutil
+import json
+import re
 import requests
+
 import discord
 from discord.ext import commands
+
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
 from dotenv import load_dotenv
-from product_inference import db
-import ollama
 from sarvamai import SarvamAI
-import json
-import shutil
-import asyncio
-import re
 
+import product_inference.db as db
+from core_inference.graph import graph_app
+
+# ── ENV SETUP ─────────────────────────────────────────────────────────────────
 load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
-SARVAM_API_KEY = os.getenv('SARVAM_API_KEY')
+DISCORD_TOKEN     = os.getenv('DISCORD_TOKEN')
+TELEGRAM_TOKEN    = os.getenv('TELEGRAM_TOKEN')
+SARVAM_API_KEY    = os.getenv('SARVAM_API_KEY')
 
-# Initialize the database layout
 db.init_db()
-
-# Initialize the Sarvam AI SDK Client
 sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
-
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-# Ensure temporary media directory paths exist safely
 os.makedirs("./temp_voice", exist_ok=True)
 
-# ── HELPER: DYNAMIC LANGUAGE DETECTION ────────────────────────────────────────
+# Per-user task trackers for /stop
+_discord_tasks:  dict[str, asyncio.Task] = {}
+_telegram_tasks: dict[str, asyncio.Task] = {}
+
+# ── HEARTBEATS ────────────────────────────────────────────────────────────────
+def _start_heartbeats():
+    """Ping Healthchecks.io every 60 s for both bots."""
+    URLS = [
+        "https://hc-ping.com/6f985ce4-0f9d-40ab-9b0f-d3dd68cd2957",   # Telegram
+        "https://hc-ping.com/c38c6455-a777-4a12-b524-8b8dec9ef57d",   # Discord
+    ]
+    def _ping():
+        while True:
+            for url in URLS:
+                try:
+                    urllib.request.urlopen(url, timeout=10)
+                except Exception:
+                    pass
+            time.sleep(60)
+    threading.Thread(target=_ping, daemon=True).start()
+
+# ── SARVAM HELPERS ────────────────────────────────────────────────────────────
 def get_tts_language(text: str) -> str:
-    """
-    Scans the text for Devanagari (Hindi) characters. 
-    Routes to Hindi TTS if found, otherwise defaults to Indian English.
-    """
     if re.search(r'[\u0900-\u097F]', text):
         return "hi-IN"
     return "en-IN"
 
-# ── WEEK 4: PRODUCTION SARVAM AI SPEECH-TO-TEXT ENGINE ────────────────────────
+
 def execute_sarvam_stt(local_file_path: str, user_id: str) -> str:
-    """
-    Concurrency-safe transcription pipeline isolated by user_id.
-    Parses the target JSON asset downloaded from Sarvam.
-    """
+    """Transcribe audio to text using Sarvam Saaras STT."""
     user_dir = f"./temp_voice/{user_id}"
-    out_dir = os.path.join(user_dir, "output")
-    
+    out_dir  = os.path.join(user_dir, "output")
+
     if os.path.exists(user_dir):
         shutil.rmtree(user_dir)
     os.makedirs(out_dir, exist_ok=True)
 
-    isolated_audio_filename = os.path.basename(local_file_path)
-    isolated_audio_path = os.path.join(user_dir, isolated_audio_filename)
-    shutil.move(local_file_path, isolated_audio_path)
+    isolated = os.path.join(user_dir, os.path.basename(local_file_path))
+    shutil.move(local_file_path, isolated)
 
     job = sarvam_client.speech_to_text_job.create_job(
-        model="saaras:v3",
-        mode="transcribe",
-        language_code="unknown",
-        with_diarization=False
+        model="saaras:v3", mode="transcribe",
+        language_code="unknown", with_diarization=False
     )
-    
-    job.upload_files(file_paths=[isolated_audio_path])
+    job.upload_files(file_paths=[isolated])
     job.start()
     job.wait_until_complete()
     job.download_outputs(output_dir=out_dir)
-    
-    for root, dirs, files in os.walk(out_dir):
-        for file in files:
-            if file.endswith('.json'):
-                json_path = os.path.join(root, file)
-                print(f"📁 Found Sarvam JSON transcription asset at: {json_path}")
-                
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                
-                try:
-                    shutil.rmtree(user_dir)
-                except:
-                    pass
-                
+
+    for root, _, files in os.walk(out_dir):
+        for f in files:
+            if f.endswith('.json'):
+                with open(os.path.join(root, f), "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                shutil.rmtree(user_dir, ignore_errors=True)
                 if isinstance(data, dict):
-                    if "transcript" in data:
-                        return data["transcript"].strip()
-                    if "text" in data:
-                        return data["text"].strip()
+                    for key in ("transcript", "text"):
+                        if key in data:
+                            return data[key].strip()
                     if "model_output" in data and "transcript" in data["model_output"]:
                         return data["model_output"]["transcript"].strip()
                     if "segments" in data:
-                        return " ".join([seg.get("transcript", seg.get("text", "")) for seg in data["segments"]]).strip()
-                
-                raise KeyError(f"Could not find transcript text key inside Sarvam JSON schema.")
-                
-    try:
-        shutil.rmtree(user_dir)
-    except:
-        pass
-        
-    raise FileNotFoundError("Sarvam STT data pipeline completed, but no json results were found.")
+                        return " ".join(s.get("transcript", s.get("text", "")) for s in data["segments"]).strip()
+                raise KeyError("Could not find transcript key in Sarvam response.")
 
-# ── WEEK 4: PRODUCTION SARVAM AI TEXT-TO-SPEECH STREAMER ──────────────────────
-def execute_sarvam_tts(text_payload: str, output_path: str, lang_code: str):
-    """
-    Queries Bulbul V3 streaming transcription matrices over raw HTTP connection pools.
-    Dynamically sets target language based on input text structure.
-    """
-    api_url = "https://api.sarvam.ai/text-to-speech/stream"
-    headers = {
-        "api-subscription-key": SARVAM_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "text": text_payload,
-        "target_language_code": lang_code, 
-        "speaker": "shubh",
-        "model": "bulbul:v3",
-        "pace": 1,
-        "speech_sample_rate": 22050,
-        "output_audio_codec": "mp3",
-        "enable_preprocessing": True
-    }
-    
-    with requests.post(api_url, headers=headers, json=payload, stream=True) as response:
-        response.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+    shutil.rmtree(user_dir, ignore_errors=True)
+    raise FileNotFoundError("Sarvam STT completed but produced no JSON output.")
 
-# ── WEEK 4: LLM LIGHTWEIGHT INTENT ROUTER ─────────────────────────────────────
-def classify_user_intent(user_input: str) -> str:
-    system_instruction = """
-    You are a fast semantic classifier system router.
-    Analyze the user input text and respond with EXACTLY one word:
-    - 'CHIT_CHAT' if the user is saying hello, goodbye, thanking you, or asking casual conversational questions.
-    - 'SCHEME_QUERY' if the user is asking about welfare schemes, scholarships, monetary problems, jobs, or financial assistance.
-    Do not output any punctuation or other text.
-    """
+
+def execute_sarvam_tts(text: str, output_path: str, lang_code: str):
+    """Stream TTS audio from Sarvam Bulbul to a local file."""
+    resp = requests.post(
+        "https://api.sarvam.ai/text-to-speech/stream",
+        headers={"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"},
+        json={
+            "text": text, "target_language_code": lang_code,
+            "speaker": "shubh", "model": "bulbul:v3",
+            "pace": 1, "speech_sample_rate": 22050,
+            "output_audio_codec": "mp3", "enable_preprocessing": True
+        },
+        stream=True
+    )
+    resp.raise_for_status()
+    with open(output_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+
+
+# ── SHARED: INVOKE GRAPH AND OPTIONALLY REPLY WITH VOICE ──────────────────────
+async def _run_and_reply_discord(text_input: str, user_id: str, message: discord.Message,
+                                  status_msg: discord.Message, is_voice: bool):
     try:
-        response = ollama.chat(
-            model='llama3.1',
-            messages=[
-                {'role': 'system', 'content': system_instruction},
-                {'role': 'user', 'content': user_input}
-            ],
-            options={'temperature': 0.0}
+        config = {"configurable": {"thread_id": user_id}}
+        graph_output = await asyncio.to_thread(
+            graph_app.invoke,
+            {"messages": [{"role": "user", "content": text_input}], "user_id": user_id},
+            config=config
         )
-        classification = response['message']['content'].strip()
-        return "CHIT_CHAT" if "CHIT_CHAT" in classification else "SCHEME_QUERY"
-    except:
-        return "SCHEME_QUERY" 
+        ai_response = graph_output.get("response", "I encountered a processing error. Please retry.")
+        if not ai_response or not ai_response.strip():
+            ai_response = "I processed your request but the response was empty. Please try again."
+        await status_msg.delete()
 
-@bot.event
+        if is_voice:
+            voice_msg = await message.channel.send("Synthesizing voice response...")
+            try:
+                out_path = f"./temp_voice/response_{user_id}.mp3"
+                lang = get_tts_language(ai_response)
+                await asyncio.to_thread(execute_sarvam_tts, ai_response, out_path, lang)
+                await voice_msg.delete()
+                await message.channel.send(file=discord.File(out_path))
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except Exception as tts_err:
+                await voice_msg.edit(content="Voice synthesis failed, sending text instead.")
+                print(f"[TTS Error] {tts_err}")
+                await message.channel.send(ai_response)
+        else:
+            # Safe chunking for Discord 2000-char limit
+            if len(ai_response) > 2000:
+                for line in ai_response.split('\n'):
+                    if line:
+                        await message.channel.send(line[:2000])
+            else:
+                await message.channel.send(ai_response)
+
+    except asyncio.CancelledError:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        await message.channel.send("An error occurred. Please try again.")
+        print(f"[Discord Audio Bot Error] {e}")
+    finally:
+        _discord_tasks.pop(user_id, None)
+
+
+async def _run_and_reply_telegram(text_input: str, user_id: str, update: Update,
+                                   context: ContextTypes.DEFAULT_TYPE,
+                                   status_msg, is_voice: bool):
+    try:
+        config = {"configurable": {"thread_id": user_id}}
+        graph_output = await asyncio.to_thread(
+            graph_app.invoke,
+            {"messages": [{"role": "user", "content": text_input}], "user_id": user_id},
+            config=config
+        )
+        ai_response = graph_output.get("response", "I encountered a processing error. Please retry.")
+        if not ai_response or not ai_response.strip():
+            ai_response = "I processed your request but the response was empty. Please try again."
+
+        if is_voice:
+            await status_msg.edit_text("Synthesizing voice response...")
+            try:
+                out_path = f"./temp_voice/response_{user_id}.mp3"
+                lang = get_tts_language(ai_response)
+                await asyncio.to_thread(execute_sarvam_tts, ai_response, out_path, lang)
+                await status_msg.delete()
+                with open(out_path, "rb") as af:
+                    await context.bot.send_audio(chat_id=update.effective_chat.id, audio=af)
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except Exception as tts_err:
+                await status_msg.edit_text("Voice synthesis failed, sending text instead.")
+                print(f"[TTS Error] {tts_err}")
+                await update.message.reply_text(ai_response)
+        else:
+            # Safe chunking for Telegram 4096-char limit
+            if len(ai_response) > 4000:
+                lines = ai_response.split('\n')
+                chunk = ""
+                for line in lines:
+                    if len(chunk) + len(line) + 1 > 4000:
+                        await status_msg.edit_text(chunk)
+                        status_msg = await update.message.reply_text("...")
+                        chunk = line + '\n'
+                    else:
+                        chunk += line + '\n'
+                if chunk.strip():
+                    await status_msg.edit_text(chunk)
+            else:
+                await status_msg.edit_text(ai_response)
+
+    except asyncio.CancelledError:
+        try:
+            await status_msg.edit_text("Request cancelled.")
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            await status_msg.edit_text("An error occurred. Please try again.")
+        except Exception:
+            pass
+        print(f"[Telegram Audio Bot Error] {e}")
+    finally:
+        _telegram_tasks.pop(user_id, None)
+
+
+# ── DISCORD BOT ───────────────────────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+discord_bot = commands.Bot(command_prefix='!', intents=intents)
+
+@discord_bot.event
 async def on_ready():
-    print(f'==========================================')
-    print(f'🤖 Yojana Mitra Full Profiler Online')
-    print(f'==========================================')
+    print("==========================================")
+    print(" Yojana Mitra Discord (Audio Mode) Active")
+    print("==========================================")
 
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
+@discord_bot.event
+async def on_message(message: discord.Message):
+    if message.author == discord_bot.user:
         return
-
     if not isinstance(message.channel, discord.DMChannel):
-        await message.channel.send(f"Hi {message.author.mention}, please DM me directly to securely check eligibility!")
+        await message.channel.send(f"Hi {message.author.mention}, please DM me to get started!")
         return
 
     user_id = f"discord_{message.author.id}"
-    username = message.author.name
-    
-    user_record = db.get_or_create_user(user_id, username)
-    current_state = user_record['current_state']
-    
-    text = message.content.strip()
-    is_voice_mode = False
+    text_input = message.content.strip()
+    is_voice = False
 
-    # ── AUDIO ATTACHMENT INTERCEPTOR (THREAD SAFE) ────────────────────────────
+    # ── Audio attachment → STT ─────────────────────────────────────────────
     if message.attachments:
-        for attachment in message.attachments:
-            if "audio" in str(attachment.content_type) or attachment.filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
-                is_voice_mode = True
-                processing_msg = await message.channel.send("🎙️ *Voice message detected! Transcribing via Sarvam STT...*")
+        for att in message.attachments:
+            if "audio" in str(att.content_type) or att.filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
+                is_voice = True
+                processing_msg = await message.channel.send("Voice message received, transcribing...")
                 try:
-                    unique_filename = f"{user_id}_{attachment.filename}"
-                    temp_audio_path = os.path.join("./temp_voice", unique_filename)
-                    await attachment.save(temp_audio_path)
-                    
-                    # RUN IN BACKGROUND THREAD TO PREVENT DISCORD CRASH
-                    transcribed_text = await asyncio.to_thread(execute_sarvam_stt, temp_audio_path, user_id)
-                    
-                    text = transcribed_text.strip()
-                    await processing_msg.edit(content=f"📝 *Transcribed Content:* \"{text}\"")
-                    
-                except Exception as audio_err:
-                    await processing_msg.edit(content="❌ Failed to process or transcribe the incoming audio stream.")
-                    print(f"Audio Handshake Exception: {audio_err}")
+                    tmp_path = f"./temp_voice/{user_id}_{att.filename}"
+                    await att.save(tmp_path)
+                    text_input = await asyncio.to_thread(execute_sarvam_stt, tmp_path, user_id)
+                    await processing_msg.edit(content=f'Transcribed: "{text_input}"')
+                except Exception as e:
+                    await processing_msg.edit(content="Failed to transcribe audio. Please try again.")
+                    print(f"[Discord STT Error] {e}")
                     return
+                break
 
-    # --- FULL 13-STEP PROFILE STATE MACHINE ---
-    if current_state == 'START':
-        await message.channel.send(
-            f"Hello {message.author.name}! Let's build your profile for Yojana Mitra. 🇮🇳\n\n"
-            "**Step 1:** What is your **Gender**? (e.g., Male, Female, Other)"
-        )
-        db.update_user_state(user_id, 'AWAITING_GENDER')
+    if not text_input:
         return
 
-    elif current_state == 'AWAITING_GENDER':
-        db.update_user_state(user_id, 'AWAITING_AGE', {'gender': text})
-        await message.channel.send("**Step 2:** What is your **Age**? (Numbers only)")
-        return
-
-    elif current_state == 'AWAITING_AGE':
-        if not text.isdigit():
-            await message.channel.send("❌ Please enter a valid number for age:")
-            return
-        db.update_user_state(user_id, 'AWAITING_INCOME', {'age': int(text)})
-        await message.channel.send("**Step 3:** What is your annual family **Income** in INR? (Numbers only, e.g., 45000)")
-        return
-
-    elif current_state == 'AWAITING_INCOME':
-        if not text.isdigit():
-            await message.channel.send("❌ Please enter a valid number for income:")
-            return
-        db.update_user_state(user_id, 'AWAITING_CASTE', {'income': int(text)})
-        await message.channel.send("**Step 4:** What is your **Caste** category? (e.g., General, OBC, SC, ST)")
-        return
-
-    elif current_state == 'AWAITING_CASTE':
-        db.update_user_state(user_id, 'AWAITING_RESIDENCE', {'caste': text})
-        await message.channel.send("**Step 5:** What is your area of **Residence**? (Rural / Urban)")
-        return
-
-    elif current_state == 'AWAITING_RESIDENCE':
-        db.update_user_state(user_id, 'AWAITING_MARITAL', {'residence': text})
-        await message.channel.send("**Step 6:** What is your **Marital Status**? (e.g., Single, Married, Widowed, Divorced)")
-        return
-
-    elif current_state == 'AWAITING_MARITAL':
-        db.update_user_state(user_id, 'AWAITING_DISABLED', {'marital_status': text})
-        await message.channel.send("**Step 7:** Are you **Differently Abled**? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_DISABLED':
-        is_disabled = text.lower() in ['yes', 'y', 'true']
-        if is_disabled:
-            db.update_user_state(user_id, 'AWAITING_DISABILITY_PERC', {'differently_abled': True})
-            await message.channel.send("**Step 7b:** What is your **Disability Percentage**? (Enter number, or type 'None')")
-        else:
-            db.update_user_state(user_id, 'AWAITING_MINORITY', {'differently_abled': False, 'disability_percentage': None})
-            await message.channel.send("**Step 8:** Do you belong to a **Minority** community? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_DISABILITY_PERC':
-        perc = int(text) if text.isdigit() else None
-        db.update_user_state(user_id, 'AWAITING_MINORITY', {'disability_percentage': perc})
-        await message.channel.send("**Step 8:** Do you belong to a **Minority** community? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_MINORITY':
-        is_minority = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_BPL', {'minority': is_minority})
-        await message.channel.send("**Step 9:** Do you possess a **Below Poverty Line (BPL)** card? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_BPL':
-        is_bpl = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_DISTRESS', {'below_poverty_line': is_bpl})
-        await message.channel.send("**Step 10:** Are you facing **Economic Distress**? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_DISTRESS':
-        is_distress = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_GOVT_EMP', {'economic_distress': is_distress})
-        await message.channel.send("**Step 11:** Are you a **Government Employee**? (Yes / No)")
-        return
-
-    elif current_state == 'AWAITING_GOVT_EMP':
-        is_govt = text.lower() in ['yes', 'y', 'true']
-        db.update_user_state(user_id, 'AWAITING_OCCUPATION', {'government_employee': is_govt})
-        await message.channel.send("**Step 12:** What is your primary **Occupation**? (e.g., Farmer, Student, Artisan, Unemployed)")
-        return
-
-    elif current_state == 'AWAITING_OCCUPATION':
-        db.update_user_state(user_id, 'PROFILE_COMPLETE', {'occupation': text})
-        
-        updated_user = db.get_or_create_user(user_id, username)
-        d = updated_user['profile_data']
-        
-        summary = (
-            "🎉 **Yojana Mitra Profile Created Successfully!**\n"
-            "The following structure is safely synced to PostgreSQL:\n\n"
-            f"• **Gender:** {d.get('gender')}\n"
-            f"• **Age:** {d.get('age')} years\n"
-            f"• **Income:** ₹{d.get('income'):,}\n"
-            f"• **Caste:** {d.get('caste')}\n"
-            f"• **Residence:** {d.get('residence')}\n"
-            f"• **Marital Status:** {d.get('marital_status')}\n"
-            f"• **Differently Abled:** {d.get('differently_abled')} (Perc: {d.get('disability_percentage')}%)\n"
-            f"• **Minority:** {d.get('minority')}\n"
-            f"• **BPL Status:** {d.get('below_poverty_line')}\n"
-            f"• **Economic Distress:** {d.get('economic_distress')}\n"
-            f"• **Govt Employee:** {d.get('government_employee')}\n"
-            f"• **Occupation:** {d.get('occupation')}\n\n"
-            "You are all set. Type any question now to search matching schemes!"
-        )
-        await message.channel.send(summary)
-        return
-
-    # --- ACTIVE CONVERSATION RUNTIME ---
-    elif current_state == 'PROFILE_COMPLETE':
-        status_msg = await message.channel.send("🤖 *Yojana Mitra is analyzing the input stream...*")
-        profile_data = user_record['profile_data']
-        
+    # /reset and /stop
+    if text_input.lower() in ("/reset", "!reset", "reset"):
+        old = _discord_tasks.pop(user_id, None)
+        if old and not old.done():
+            old.cancel()
         try:
-            # RUN CLASSIFIER IN THREAD
-            intent = await asyncio.to_thread(classify_user_intent, text)
-            
-            if intent == 'CHIT_CHAT':
-                await status_msg.edit(content="💬 *Thinking...*")
-                
-                # Dynamic Prompt: Reply in the same language the user spoke
-                chat_prompt = "You are Yojana Mitra, a helpful AI assistant. Reply briefly, politely, and naturally. You MUST reply in the exact same language the user used (e.g., if they spoke English, use English. If they spoke Hindi/Hinglish, use Hindi/Hinglish)."
-                response = await asyncio.to_thread(
-                    ollama.chat,
-                    model='llama3.1',
-                    messages=[
-                        {'role': 'system', 'content': chat_prompt},
-                        {'role': 'user', 'content': text}
-                    ]
-                )
-                ai_response = response['message']['content']
-            else:
-                await status_msg.edit(content="🔍 *Searching government scheme matrices...*")
-                from core_inference import hybrid_rag
-                
-                # RUN RAG PIPELINE IN BACKGROUND THREAD
-                ai_response = await asyncio.to_thread(hybrid_rag.run_yojana_pipeline, profile_data, text)
-            
-            await status_msg.delete()
-            
-            if is_voice_mode:
-                voice_status = await message.channel.send("🗣️ *Synthesizing voice response audio streams via Sarvam Bulbul...*")
-                try:
-                    out_audio_path = f"./temp_voice/response_{user_id}.mp3"
-                    
-                    # DYNAMICALLY DETECT LANGUAGE FOR TTS
-                    target_lang = get_tts_language(ai_response)
-                    
-                    # RUN TTS STREAM IN BACKGROUND THREAD
-                    await asyncio.to_thread(execute_sarvam_tts, ai_response, out_audio_path, target_lang)
-                    
-                    await voice_status.delete()
-                    await message.channel.send(file=discord.File(out_audio_path))
-                    
-                    if os.path.exists(out_audio_path):
-                        os.remove(out_audio_path)
-                except Exception as tts_err:
-                    await voice_status.edit(content="⚠️ Voice output synthesis faulted. Falling back to clean text delivery alternative.")
-                    print(f"TTS Engine Fault Event: {tts_err}")
-                    await message.channel.send(ai_response)
-            else:
-                if len(ai_response) > 2000:
-                    lines = ai_response.split('\n')
-                    current_chunk = ""
-                    for line in lines:
-                        if len(current_chunk) + len(line) + 1 > 1900:
-                            await message.channel.send(current_chunk)
-                            current_chunk = line + '\n'
-                        else:
-                            current_chunk += line + '\n'
-                    if current_chunk.strip():
-                        await message.channel.send(current_chunk)
-                else:
-                    await message.channel.send(ai_response)
-            
+            import psycopg2
+            from product_inference.db import DB_PARAMS
+            conn = psycopg2.connect(**DB_PARAMS)
+            cur = conn.cursor()
+            for tbl, col in [("user_profiles","platform_id"),("pii_vault","user_id"),
+                              ("checkpoints","thread_id"),("checkpoint_writes","thread_id")]:
+                cur.execute(f"DELETE FROM {tbl} WHERE {col} = %s;", (user_id,))
+            conn.commit(); cur.close(); conn.close()
+            await message.channel.send("Profile reset complete. Send a message to start fresh!")
         except Exception as e:
-            try:
-                await status_msg.delete()
-            except:
-                pass
-            await message.channel.send("❌ Operational exception encountered handling production runtime inference layers.")
-            print(f"Runtime Exception Event: {e}")
-            
+            print(f"[Reset Error] {e}")
+            await message.channel.send("Reset encountered an error. Please try again.")
         return
 
-bot.run(TOKEN)
+    if text_input.lower() in ("/stop", "!stop", "stop"):
+        task = _discord_tasks.get(user_id)
+        if task and not task.done():
+            _discord_tasks.pop(user_id, None)
+            task.cancel()
+            await message.channel.send("Stopped. Send a new message to continue.")
+        return
+
+    # Cancel any old task, start new one
+    old = _discord_tasks.pop(user_id, None)
+    if old and not old.done():
+        old.cancel()
+
+    status_msg = await message.channel.send("Yojana Mitra is processing...")
+    _discord_tasks[user_id] = asyncio.create_task(
+        _run_and_reply_discord(text_input, user_id, message, status_msg, is_voice)
+    )
+
+
+# ── TELEGRAM BOT ──────────────────────────────────────────────────────────────
+async def tg_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = f"telegram_{update.effective_user.id}"
+    text_input = update.message.text or ""
+    is_voice = False
+
+    # ── Voice / Audio attachment → STT ─────────────────────────────────────
+    voice_obj = update.message.voice or update.message.audio
+    if voice_obj:
+        is_voice = True
+        processing_msg = await update.message.reply_text("Voice message received, transcribing...")
+        try:
+            tg_file = await context.bot.get_file(voice_obj.file_id)
+            ext = ".ogg" if update.message.voice else ".mp3"
+            tmp_path = f"./temp_voice/{user_id}_voice{ext}"
+            await tg_file.download_to_drive(tmp_path)
+            text_input = await asyncio.to_thread(execute_sarvam_stt, tmp_path, user_id)
+            await processing_msg.edit_text(f'Transcribed: "{text_input}"')
+        except Exception as e:
+            await processing_msg.edit_text("Failed to transcribe audio. Please try again.")
+            print(f"[Telegram STT Error] {e}")
+            return
+
+    if not text_input:
+        return
+
+    # /stop via text
+    if text_input.strip().lower() in ("/stop", "stop"):
+        task = _telegram_tasks.get(user_id)
+        if task and not task.done():
+            _telegram_tasks.pop(user_id, None)
+            task.cancel()
+            await update.message.reply_text("Stopped. Send a new message to continue.")
+        return
+
+    old = _telegram_tasks.pop(user_id, None)
+    if old and not old.done():
+        old.cancel()
+
+    status_msg = await update.message.reply_text("Yojana Mitra is processing...")
+    _telegram_tasks[user_id] = asyncio.create_task(
+        _run_and_reply_telegram(text_input, user_id, update, context, status_msg, is_voice)
+    )
+
+
+async def tg_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = f"telegram_{update.effective_user.id}"
+    old = _telegram_tasks.pop(user_id, None)
+    if old and not old.done():
+        old.cancel()
+    try:
+        import psycopg2
+        from product_inference.db import DB_PARAMS
+        conn = psycopg2.connect(**DB_PARAMS)
+        cur = conn.cursor()
+        for tbl, col in [("user_profiles","platform_id"),("pii_vault","user_id"),
+                          ("checkpoints","thread_id"),("checkpoint_writes","thread_id")]:
+            cur.execute(f"DELETE FROM {tbl} WHERE {col} = %s;", (user_id,))
+        conn.commit(); cur.close(); conn.close()
+        await update.message.reply_text("Profile reset complete. Send a message to start fresh!")
+    except Exception as e:
+        print(f"[Reset Error] {e}")
+        await update.message.reply_text("Reset encountered an error. Please try again.")
+
+
+async def tg_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = f"telegram_{update.effective_user.id}"
+    task = _telegram_tasks.get(user_id)
+    if task and not task.done():
+        _telegram_tasks.pop(user_id, None)
+        task.cancel()
+        await update.message.reply_text("Stopped. Send a new message to continue.")
+
+
+# ── MAIN: RUN BOTH BOTS CONCURRENTLY ─────────────────────────────────────────
+async def run_telegram():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("reset", tg_reset_command))
+    app.add_handler(CommandHandler("stop",  tg_stop_command))
+    app.add_handler(MessageHandler(
+        filters.TEXT | filters.VOICE | filters.AUDIO | filters.PHOTO | filters.Document.ALL,
+        tg_handle_message
+    ))
+    async with app:
+        await app.start()
+        print("==========================================")
+        print(" Yojana Mitra Telegram (Audio Mode) Active")
+        print("==========================================")
+        await app.updater.start_polling()
+        # Keep running until cancelled
+        await asyncio.Event().wait()
+        await app.updater.stop()
+        await app.stop()
+
+
+async def main():
+    _start_heartbeats()
+    await asyncio.gather(
+        discord_bot.start(DISCORD_TOKEN),
+        run_telegram()
+    )
+
+
+if __name__ == '__main__':
+    if not DISCORD_TOKEN:
+        print("[Error] DISCORD_TOKEN not found in .env")
+    elif not TELEGRAM_TOKEN:
+        print("[Error] TELEGRAM_TOKEN not found in .env")
+    elif not SARVAM_API_KEY:
+        print("[Error] SARVAM_API_KEY not found in .env")
+    else:
+        asyncio.run(main())
