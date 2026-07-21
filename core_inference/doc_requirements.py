@@ -66,52 +66,48 @@ def parse_required_documents(documents_needed_text: str, scheme_name: str = "") 
     # Strip BOM or empty placeholder characters common in some JSON extractions
     clean_text = clean_text.replace("\ufeff", "").strip()
     
-    if not clean_text:
-        # Fallback if no explicit document text was provided in the database
-        prompt = f"""You are determining standard required documents for an Indian government scheme named: "{scheme_name}".
+    if not clean_text or len(clean_text) < 5:
+        # Graceful fallback: If no docs are provided by the DB, do NOT hallucinate them.
+        return {
+            "scannable": [],
+            "manual": ["Please refer to the official scheme guidelines for the required document checklist."]
+        }
+        
+    prompt = f"""You are a precise document extraction assistant for an Indian government scheme.
 
-Based on typical Indian welfare schemes of this nature, list the essential required documents.
-Classify each document into ONE of two categories:
+Scheme Name: "{scheme_name}"
 
-SCANNABLE (user can photograph and upload):
-Valid labels ONLY from this exact list: {', '.join(SCANNABLE_DOC_TYPES)}
-
-MANUAL (user must obtain from an office or prepare manually):
-Return the descriptive document name as-is.
-
-Output ONLY valid JSON in this exact format:
-{{"scannable": ["aadhaar", "income_certificate"], "manual": []}}"""
-    else:
-        prompt = f"""You are parsing a list of required documents for an Indian government scheme ({scheme_name}).
-
-Input text:
+Input text of required documents:
+'''
 {clean_text}
+'''
 
-Classify each document into ONE of two categories:
+Your task is to classify EACH required document mentioned in the input text into ONE of two categories:
 
-SCANNABLE (user can photograph and upload):
-Valid labels ONLY from this exact list: {', '.join(SCANNABLE_DOC_TYPES)}
+1. SCANNABLE: Standard documents we can verify instantly via photo.
+MUST use ONLY exact labels from this list: {', '.join(SCANNABLE_DOC_TYPES)}
 
-MANUAL (user must obtain from an office — cannot be photographed for our extraction purposes):
-Return the original document name as-is.
+2. MANUAL: Custom, unique, or un-scannable documents (e.g. project reports, custom certificates, forms).
+Extract the exact descriptive phrase from the text.
 
-Rules:
-- "Identity proof i.e. Aadhaar card / Voter ID" or "Proof of identity (Aadhaar/Voter ID)" → pick "aadhaar" (primary ID)
-- "Passport size photo" or "Photographs" → "photograph"
-- "Proof of age" or "Date of birth" → "birth_certificate" (or "age_proof" if broader)
-- "Community Certificate" and "Caste Certificate" are the SAME → "caste_certificate"
-- Skip file format/size instructions like "*file size should be less than 200kb" or "*file type should be PDF"
-- If a document says "or" between two options, pick the most common primary option
-- "Bank Pass Book" or "Bank account details" → "bank_passbook"
-- Deduplicate any repeated document labels
+CRITICAL RULES:
+1. DO NOT HALLUCINATE. If "Aadhaar" or "Photograph" is NOT in the input text, DO NOT include them in your output.
+2. If the input text is blank or only contains a single vague sentence, both arrays should be empty.
+3. Map "Age Proof" or "Date of birth" -> "age_proof" or "birth_certificate".
+4. Map "Identity proof" -> "aadhaar" (only if Aadhaar/Voter ID is explicitly mentioned as an example).
 
-Output ONLY valid JSON inside markdown block or as raw JSON string in this exact format:
-{{"scannable": ["aadhaar", "income_certificate"], "manual": ["Marriage Invitation"]}}"""
+You must output ONLY valid JSON in this EXACT structure:
+{{
+  "reasoning": "Step 1: I see 'Death Certificate', this is not in the scannable list, so it goes to manual. Step 2: I see 'Registration Card', this goes to manual. Neither Aadhaar nor Photograph are mentioned, so I will NOT include them.",
+  "scannable": ["label1", "label2"],
+  "manual": ["exact phrase 1", "exact phrase 2"]
+}}"""
 
     try:
         response = ollama.chat(
             model='llama3.1',
             messages=[{"role": "user", "content": prompt}],
+            format='json',
             options={"temperature": 0.0}
         )
         
@@ -142,8 +138,113 @@ Output ONLY valid JSON inside markdown block or as raw JSON string in this exact
         
     except Exception as e:
         print(f"[Doc Requirements Error] Failed to parse document requirements: {e}")
-        # Safe fallback: require Aadhaar as universal baseline identity proof if parsing fails
+        # Safe fallback: Do NOT hallucinate Aadhaar. Just return the raw text as manual.
         return {
-            "scannable": ["aadhaar"],
+            "scannable": [],
             "manual": [clean_text] if clean_text else []
+        }
+
+
+def evaluate_application_mode(sources_references: list, scheme_name: str = "") -> Dict:
+    """
+    Uses Llama 3.1 to intuitively analyze a scheme's Sources & References links
+    and determine the application mode + extract ALL relevant links.
+    
+    This replaces the hardcoded keyword matching in classify_application_mode.
+    Called at runtime when a user wants to apply — takes ~1-2 seconds.
+    
+    Args:
+        sources_references: List of {"label": "...", "url": "..."} dicts from the DB
+        scheme_name: Name of the scheme for context
+    
+    Returns:
+        {
+            "mode": "online" | "pdf_form" | "physical_only" | "unknown",
+            "online_link": "https://..." or null,
+            "pdf_links": ["https://...pdf", ...],
+            "fallback_link": "https://..." (portal/guidelines link for reference)
+        }
+    """
+    # If no sources at all, it's physical_only — no LLM needed
+    if not sources_references:
+        return {
+            "mode": "physical_only",
+            "online_link": None,
+            "pdf_links": [],
+            "fallback_link": None
+        }
+    
+    # Format the links for the LLM prompt
+    links_text = ""
+    for i, item in enumerate(sources_references, 1):
+        label = item.get("label", "Unknown")
+        url = item.get("url", "")
+        links_text += f"{i}. Label: \"{label}\" | URL: {url}\n"
+    
+    prompt = f"""You are analyzing the "Sources And References" links from an Indian government scheme page to determine how a citizen can apply for this scheme.
+
+Scheme Name: "{scheme_name}"
+
+Here are ALL the links found in the Sources & References section:
+{links_text}
+
+Your task: Determine the APPLICATION MODE by analyzing the link labels and URLs intuitively.
+
+Rules for classification:
+1. **online**: A link clearly leads to an ONLINE APPLICATION PORTAL where citizens can fill and submit forms digitally. Look for labels like "Apply Online", "Online Application", "Registration Portal", "e-Service", or URLs containing "apply", "register", "login", or online portal paths. Do NOT classify a link as "online" if it's just a scheme information page, guidelines, or eligibility criteria page.
+
+2. **pdf_form**: One or more links point to downloadable PDF application forms that citizens need to print, fill, and submit physically. Look for URLs ending in ".pdf" or labels mentioning "Application Form", "Form Download". IMPORTANT: Exclude PDFs that are just "Guidelines", "Government Orders", "Notifications", or "Revised Rates" — those are NOT application forms.
+
+3. **physical_only**: The links are only informational (guidelines, government orders, scheme details, notifications). No online portal or downloadable form is available. Citizens must visit a government office in person.
+
+Respond with ONLY valid JSON in this exact format:
+{{"mode": "pdf_form", "online_link": null, "pdf_links": ["https://example.com/form1.pdf", "https://example.com/form2.pdf"], "fallback_link": "https://example.com/guidelines"}}
+
+- "mode": one of "online", "pdf_form", "physical_only"
+- "online_link": the URL of the online application portal (null if mode is not "online")
+- "pdf_links": list of ALL application form PDF URLs (empty list if none found). Include ALL relevant PDFs like English form, Tamil form, etc. Exclude guideline/notification PDFs.
+- "fallback_link": the most useful informational link for the citizen (guidelines page, scheme page, etc.) — always provide one if available"""
+
+    try:
+        response = ollama.chat(
+            model='llama3.1',
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.0}
+        )
+        
+        raw_output = response['message']['content']
+        cleaned_output = extract_and_print_thoughts("APPLICATION MODE EVALUATOR", raw_output)
+        
+        # Strip markdown code block if present
+        if "```json" in cleaned_output:
+            cleaned_output = cleaned_output.split("```json")[1].split("```")[0].strip()
+        elif "```" in cleaned_output:
+            cleaned_output = cleaned_output.split("```")[1].split("```")[0].strip()
+            
+        result = json.loads(cleaned_output)
+        
+        # Validate and normalize
+        valid_modes = {"online", "pdf_form", "physical_only", "unknown"}
+        if result.get("mode") not in valid_modes:
+            result["mode"] = "unknown"
+        
+        result.setdefault("online_link", None)
+        result.setdefault("pdf_links", [])
+        result.setdefault("fallback_link", None)
+        
+        # Ensure pdf_links is always a list
+        if not isinstance(result["pdf_links"], list):
+            result["pdf_links"] = [result["pdf_links"]] if result["pdf_links"] else []
+        
+        print(f"[App Mode Eval] {scheme_name} → {result['mode'].upper()} | online={result['online_link']} | pdfs={len(result['pdf_links'])}")
+        return result
+        
+    except Exception as e:
+        print(f"[App Mode Eval Error] Failed to evaluate application mode: {e}")
+        # Safe fallback: return unknown so the system tries on-demand scrape
+        return {
+            "mode": "unknown",
+            "online_link": None,
+            "pdf_links": [],
+            "fallback_link": sources_references[0].get("url") if sources_references else None
         }

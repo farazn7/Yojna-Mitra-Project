@@ -1,5 +1,6 @@
 import os
 import asyncio
+import signal
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -18,11 +19,52 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# Per-user task tracker for /stop cancellation
+_active_tasks: dict[str, asyncio.Task] = {}
+
 @bot.event
 async def on_ready():
     print(f'==========================================')
     print(f' Yojana Mitra Powered by LangGraph Active')
     print(f'==========================================')
+
+async def _do_reset(user_id: str) -> bool:
+    """Shared reset logic: wipes profile, vault, and checkpointer state from DB."""
+    import psycopg2
+    from product_inference.db import DB_PARAMS
+    conn = psycopg2.connect(**DB_PARAMS)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM user_profiles WHERE platform_id = %s;", (user_id,))
+    cur.execute("DELETE FROM pii_vault WHERE user_id = %s;", (user_id,))
+    cur.execute("DELETE FROM checkpoints WHERE thread_id = %s;", (user_id,))
+    cur.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s;", (user_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+@bot.slash_command(name="reset", description="Wipe your profile and start fresh.")
+async def reset_slash(ctx):
+    user_id = f"discord_{ctx.author.id}"
+    task = _active_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+    try:
+        await asyncio.to_thread(_do_reset, user_id)
+        await ctx.respond("🔄 **Profile Reset Complete.**\n\nAll your data has been wiped. Send me any message to start fresh!", ephemeral=True)
+    except Exception as e:
+        print(f"[Reset Error] {e}")
+        await ctx.respond("⚠️ Reset encountered an error. Please try again.", ephemeral=True)
+
+@bot.slash_command(name="stop", description="Stop the currently running task.")
+async def stop_slash(ctx):
+    user_id = f"discord_{ctx.author.id}"
+    task = _active_tasks.get(user_id)
+    if task and not task.done():
+        _active_tasks.pop(user_id, None)
+        task.cancel()
+        await ctx.respond("🛑 **Stopped.** Send a new message to continue.", ephemeral=True)
+    # Silently ignore if nothing is running
+
 
 @bot.event
 async def on_message(message):
@@ -34,7 +76,7 @@ async def on_message(message):
         await message.channel.send(f"Hi {message.author.mention}, please DM me directly to securely check eligibility!")
         return
 
-    user_id = str(message.author.id)
+    user_id = f"discord_{message.author.id}"
 
     # ---------------------------------------------------------
     # NEW CODE: 3-PASS DOCUMENT INTERCEPTOR & PII VAULT SAVING
@@ -141,69 +183,119 @@ async def on_message(message):
 
     # If it wasn't an attachment, proceed to LangGraph text processing
     text_input = message.content.strip()
+
+    # /reset command — full nuclear wipe
+    if text_input.lower() in ("/reset", "!reset", "reset"):
+        task = _active_tasks.pop(user_id, None)
+        if task and not task.done():
+            task.cancel()
+        try:
+            await asyncio.to_thread(_do_reset, user_id)
+            await message.channel.send("🔄 **Profile Reset Complete.**\n\nAll your data has been wiped. Send me any message to start fresh!")
+        except Exception as e:
+            print(f"[Reset Error] {e}")
+            await message.channel.send("⚠️ Reset encountered an error. Please try again.")
+        return
+
+    # /stop command — cancel in-progress task only if one is running (silent otherwise)
+    if text_input.lower() in ("/stop", "!stop", "stop"):
+        task = _active_tasks.get(user_id)
+        if task and not task.done():
+            _active_tasks.pop(user_id, None)
+            task.cancel()
+            await message.channel.send("🛑 **Stopped.** Send a new message to continue.")
+        return
+
+    # If this user already has a task running, cancel it before starting a new one
+    old_task = _active_tasks.pop(user_id, None)
+    if old_task and not old_task.done():
+        old_task.cancel()
+
     status_msg = await message.channel.send(" *Yojana Mitra is processing...*")
 
-    try:
-        # Wrap the state evaluation inside an isolated background thread context to prevent thread locking
-        config = {"configurable": {"thread_id": user_id}}
-        
-        graph_output = await asyncio.to_thread(
-            graph_app.invoke,
-            {
-                "messages": [{"role": "user", "content": text_input}],
-                "user_id": user_id
-            },
-            config=config
-        )
-
-        ai_response = graph_output.get("response", "I encountered a processing anomaly. Please retry.")
-        if not ai_response or not ai_response.strip():
-            ai_response = "I processed your request, but the generated response was empty. Please try asking your question again!"
-        await status_msg.delete()
-
-        # Check if the automation engine reached a HITL checkpoint or Final Confirmation gate with a screenshot
-        automation_status = graph_output.get("automation_status", "idle")
-        auto_session_id = graph_output.get("automation_session_id", f"auto_{user_id}")
-        
-        discord_file = None
-        if automation_status in ("hitl_paused", "awaiting_confirm"):
-            shot_name = f"{auto_session_id}_final_review.png" if automation_status == "awaiting_confirm" else f"{auto_session_id}_otp_intercept.png"
-            shot_path = os.path.join("screenshots", shot_name)
-            if os.path.exists(shot_path):
-                try:
-                    discord_file = discord.File(shot_path, filename=shot_name)
-                except Exception as e:
-                    print(f"[Screenshot Attachment Note] Could not load image {shot_path}: {e}")
-
-        # SAFE CHUNKING: Break up responses longer than 2000 characters
-        if len(ai_response) > 2000:
-            lines = ai_response.split('\n')
-            current_chunk = ""
-            
-            for line in lines:
-                if len(current_chunk) + len(line) + 1 > 1900:
-                    await message.channel.send(current_chunk)
-                    current_chunk = line + '\n'
-                else:
-                    current_chunk += line + '\n'
-            
-            if current_chunk.strip():
-                if discord_file:
-                    await message.channel.send(current_chunk, file=discord_file)
-                else:
-                    await message.channel.send(current_chunk)
-        else:
-            if discord_file:
-                await message.channel.send(ai_response, file=discord_file)
-            else:
-                await message.channel.send(ai_response)
-
-    except Exception as e:
+    async def _run_graph():
         try:
+            config = {"configurable": {"thread_id": user_id}}
+            
+            graph_output = await asyncio.to_thread(
+                graph_app.invoke,
+                {
+                    "messages": [{"role": "user", "content": text_input}],
+                    "user_id": user_id
+                },
+                config=config
+            )
+
+            ai_response = graph_output.get("response", "I encountered a processing anomaly. Please retry.")
+            if not ai_response or not ai_response.strip():
+                ai_response = "I processed your request, but the generated response was empty. Please try asking your question again!"
             await status_msg.delete()
-        except:
-            pass
-        await message.channel.send(" Operational database exception encountered handling text generation pipelines.")
-        print(f"Runtime Exception Event: {e}")
+
+            # Check if the automation engine reached a HITL checkpoint or Final Confirmation gate with a screenshot
+            automation_status = graph_output.get("automation_status", "idle")
+            auto_session_id = graph_output.get("automation_session_id", f"auto_{user_id}")
+            
+            discord_file = None
+            if automation_status in ("hitl_paused", "awaiting_confirm"):
+                shot_name = f"{auto_session_id}_final_review.png" if automation_status == "awaiting_confirm" else f"{auto_session_id}_otp_intercept.png"
+                shot_path = os.path.join("screenshots", shot_name)
+                if os.path.exists(shot_path):
+                    try:
+                        discord_file = discord.File(shot_path, filename=shot_name)
+                    except Exception as e:
+                        print(f"[Screenshot Attachment Note] Could not load image {shot_path}: {e}")
+
+            # SAFE CHUNKING: Break up responses longer than 2000 characters
+            if len(ai_response) > 2000:
+                lines = ai_response.split('\n')
+                current_chunk = ""
+                
+                for line in lines:
+                    if len(current_chunk) + len(line) + 1 > 1900:
+                        await message.channel.send(current_chunk)
+                        current_chunk = line + '\n'
+                    else:
+                        current_chunk += line + '\n'
+                
+                if current_chunk.strip():
+                    if discord_file:
+                        await message.channel.send(current_chunk, file=discord_file)
+                    else:
+                        await message.channel.send(current_chunk)
+            else:
+                if discord_file:
+                    await message.channel.send(ai_response, file=discord_file)
+                else:
+                    await message.channel.send(ai_response)
+
+        except asyncio.CancelledError:
+            try:
+                await status_msg.delete()
+            except:
+                pass
+            print(f"[/stop] Task cancelled for user {user_id}")
+        except Exception as e:
+            try:
+                await status_msg.delete()
+            except:
+                pass
+            await message.channel.send(" Operational database exception encountered handling text generation pipelines.")
+            print(f"Runtime Exception Event: {e}")
+        finally:
+            _active_tasks.pop(user_id, None)
+
+    # Launch as a tracked asyncio Task
+    _active_tasks[user_id] = asyncio.create_task(_run_graph())
+
+# Graceful shutdown on Ctrl+C
+def _handle_shutdown(sig, frame):
+    print("\n[Shutdown] Gracefully stopping Yojana Mitra Discord bot...")
+    for uid, task in _active_tasks.items():
+        task.cancel()
+    _active_tasks.clear()
+    raise SystemExit(0)
+
+signal.signal(signal.SIGINT, _handle_shutdown)
+signal.signal(signal.SIGTERM, _handle_shutdown)
 
 bot.run(TOKEN)

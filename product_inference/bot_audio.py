@@ -168,7 +168,7 @@ async def on_message(message):
         await message.channel.send(f"Hi {message.author.mention}, please DM me directly to securely check eligibility!")
         return
 
-    user_id = str(message.author.id)
+    user_id = f"discord_{message.author.id}"
     username = message.author.name
     
     user_record = db.get_or_create_user(user_id, username)

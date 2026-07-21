@@ -13,7 +13,7 @@ langgraph>=0.0.30
 langgraph-checkpoint-postgres>=1.0.0
 
 # --- Phase 5: Local LLM & RAG Engine ---
-ollama==0.1.7
+ollama>=0.2.1
 pydantic>=2.7.0
 
 # --- Phase 6: Production Interface & Environment ---
@@ -28,3 +28,4 @@ requests>=2.31.0
 PyMuPDF>=1.24.0
 pdf2image>=1.17.0
 Pillow>=10.0.0
+python-telegram-bot>=21.0

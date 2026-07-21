@@ -5,8 +5,14 @@ import difflib
 
 def extract_and_print_thoughts(node_name: str, raw_response: str) -> str:
     """Extracts <think> tags, prints them to the terminal immediately, and returns clean text."""
+    # Check for unclosed think tags first (hit token limit while thinking)
+    if '<think>' in raw_response and '</think>' not in raw_response:
+        print(f"\n [AGENT THOUGHTS: {node_name}]", flush=True)
+        print(f"\033[90m{raw_response.replace('<think>', '').strip()}\033[0m", flush=True) 
+        print("-" * 50 + "\n", flush=True)
+        return "I've analyzed the schemes matching your profile, but I ran out of room to format the response. Could you please try asking your question again?"
+
     match = re.search(r'<think>(.*?)</think>', raw_response, flags=re.DOTALL | re.IGNORECASE)
-    
     if match:
         thoughts = match.group(1).strip()
         clean_text = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL | re.IGNORECASE).strip()
@@ -23,7 +29,7 @@ def extract_and_print_thoughts(node_name: str, raw_response: str) -> str:
     
     # Fallback if no think tags exist but text is empty
     if not raw_response.strip():
-        return "Namaste. I processed your request but encountered an empty response generation. Let's try that again."
+        return "Greetings. I processed your request but encountered an empty response generation. Let's try that again."
         
     return raw_response.strip()
 
@@ -45,7 +51,7 @@ def sanitize_response(response_text, context_urls):
             response_text = response_text.replace(url, "[verified URL not available in provided context]")
     return response_text
 
-def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="", top_k=7):
+def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="", top_k=10):
     """
     THE LIVE RUNTIME GATEWAY:
     Processes the user's chat query and database profile metadata 
@@ -120,7 +126,7 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
 
     # 4. Guard check if no schemes pass
     if not retrieved_schemes:
-        return "Namaste. Based on your current profile details, I could not find an exact match among the active government schemes. Could you please share more information about your situation?", []
+        return "Greetings. Based on your current profile details, I could not find an exact match among the active government schemes. Could you please share more information about your situation?", []
 
     # 5. Build dynamic context blocks and extract verified target URLs
     context_blocks = []
@@ -191,22 +197,21 @@ def run_yojana_pipeline(profile_data, text, conversation_history=None, summary="
     - If a scheme is an exact match, briefly explain why they qualify and how to apply.
     - If they almost qualify for a scheme but need a specific certificate or slightly different criteria, gently mention it as an option they can work towards.
     - Keep your tone supportive, concise, and structured with clear markdown bullet points. Do not write a long essay.
-    - DO NOT output your internal reasoning or thoughts. Provide the final response directly to the user.
 
     CANDIDATE SCHEMES CONTEXT:
     {context_string}
     """
 
-    # 9. Run inference using the exact model
+    # 9. Run inference — let the model think deeply for high-quality eligibility evaluation
     response = ollama.chat(
-        model='hf.co/qwen/qwen3-8b-gguf:q4_k_m', # Fixed to lowercase
+        model='hf.co/qwen/qwen3-8b-gguf:q4_k_m',
         messages=[
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': user_query}
         ],
         options={
             'temperature': 0.1,
-            'num_predict': 800,   
+            'num_predict': 5000,   
             'num_thread': 4
         }
     )

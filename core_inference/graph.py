@@ -33,7 +33,7 @@ def extract_and_print_thoughts(node_name: str, raw_response: str) -> str:
     
     # Fallback if no think tags exist but text is empty
     if not raw_response.strip():
-        return "Namaste. I processed your request but encountered an empty response generation. Let's try that again."
+        return "Greetings. I processed your request but encountered an empty response generation. Let's try that again."
         
     return raw_response.strip()
 
@@ -74,7 +74,8 @@ def load_user_profile(state: ConversationState) -> dict:
     user_profile = {}
     
     try:
-        user_record = db.get_or_create_user(user_id, "DiscordUser")
+        platform = user_id.split("_")[0].capitalize() if "_" in user_id else "Unknown"
+        user_record = db.get_or_create_user(user_id, f"{platform}User")
         if user_record:
             onboarding_step = user_record.get("current_state", "START")
             user_profile = user_record.get("profile_data", {})
@@ -233,42 +234,36 @@ def classify_intent(state: ConversationState) -> dict:
     if state.get("current_intent") == "CLARIFY_SCHEME_NAME" and latest_query.lower() in ["yes", "y", "yeah", "sure", "ok", "proceed", "start"]:
         return {"current_intent": "APPLY_SCHEME", "target_scheme": state.get("target_scheme", "")}
 
-    #  NEW: Fast-track check for skip command if we are currently waiting for a document
-    if state.get("awaiting_document") and latest_query.lower() in ["skip", "next", "pass", "i don't have it"]:
-        return {"current_intent": "SKIP_DOCUMENT"}
-
-    # Fast-track check for application initiation intent
-    if re.search(r'\b(apply|application|register|avail|fill form|start applying)\b', latest_query, re.IGNORECASE):
-        target = state.get("target_scheme", "")
-        last_schemes = state.get("last_discussed_schemes", [])
-        if not target and last_schemes:
-            for scheme in last_schemes:
-                s_name = scheme if isinstance(scheme, str) else str(scheme)
-                if s_name.lower() in latest_query.lower() or len(last_schemes) == 1:
-                    target = s_name
-                    break
-            if not target and last_schemes:
-                target = last_schemes[0] if isinstance(last_schemes[0], str) else str(last_schemes[0])
-        
-        if not target:
-            all_db_schemes = db.get_all_scheme_names()
-            for scheme_name in all_db_schemes:
-                if scheme_name.lower() in latest_query.lower() or any(word.lower() in latest_query.lower() for word in scheme_name.split() if len(word) > 5):
-                    target = scheme_name
-                    break
-        if not target:
-            fuzzy_target = db.find_similar_scheme_name(latest_query, threshold=0.25)
-            if fuzzy_target:
-                return {"current_intent": "CLARIFY_SCHEME_NAME", "target_scheme": fuzzy_target, "user_input_scheme": latest_query}
-        return {"current_intent": "APPLY_SCHEME", "target_scheme": target}
+    # Context Injection
+    last_schemes = state.get("last_discussed_schemes", [])
+    awaiting_doc = state.get("awaiting_document", "none")
+    current_target = state.get("target_scheme", "none")
+    
+    context_str = (
+        f"Recently Discussed Schemes: {last_schemes}\n"
+        f"Currently Selected Scheme: {current_target}\n"
+        f"Currently Awaiting Document Upload: {awaiting_doc}\n"
+    )
 
     system_prompt = (
-        "You are the routing brain of Yojana Mitra, an assistant for Indian welfare programs.\n"
-        "Categorize the user's latest statement into precisely one of these strings:\n"
-        "1. SCHEME_QUERY: Asking about benefits, documentation requirements, or checking eligibility criteria.\n"
-        "2. PROFILE_UPDATE: Intending to modify existing user profiles or starting onboarding fields from scratch.\n"
-        "3. CHIT_CHAT: General talking, greetings, gratitude, or basic statements.\n\n"
-        "Output ONLY the raw uppercase category string. Do not use markdown blocks, sentences, or punctuation."
+        "You are the intent router for Yojana Mitra, an AI assistant for Indian government welfare schemes.\n"
+        f"Context:\n{context_str}\n"
+        "Given the user's message and the context above, output ONLY a valid JSON object with two keys:\n"
+        "{\n"
+        "  \"intent\": \"<one of: SCHEME_QUERY | APPLY_SCHEME | PROFILE_UPDATE | SKIP_DOCUMENT | CHIT_CHAT>\",\n"
+        "  \"target_scheme\": \"<exact scheme name if intent is APPLY_SCHEME, else null>\"\n"
+        "}\n\n"
+        "Intent definitions:\n"
+        "- SCHEME_QUERY: User is asking about eligibility, benefits, or searching for schemes.\n"
+        "- APPLY_SCHEME: User wants to apply for or register for a specific scheme. (e.g. 'I want to apply', 'apply for book bank').\n"
+        "- PROFILE_UPDATE: User wants to change their profile details (age, income, caste, etc.) or reset.\n"
+        "- SKIP_DOCUMENT: User wants to skip the current document upload (e.g., 'skip', 'next', 'I don't have it'). ONLY select this if Currently Awaiting Document Upload is not 'none'.\n"
+        "- CHIT_CHAT: Greetings, thanks, general conversation.\n\n"
+        "IMPORTANT for APPLY_SCHEME:\n"
+        "- If the user mentions a scheme by name (even abbreviated), set target_scheme to your best match from the Recently Discussed Schemes list.\n"
+        "- If the user says something like 'apply for the second one', use the Recently Discussed Schemes list to resolve it to the exact string.\n"
+        "- If the user just says 'I want to apply' without specifying, set target_scheme to the Currently Selected Scheme if one exists, otherwise null.\n\n"
+        "Output ONLY the JSON object. Do not use markdown blocks, sentences, or punctuation."
     )
 
     try:
@@ -283,9 +278,51 @@ def classify_intent(state: ConversationState) -> dict:
         raw_output = response['message']['content']
         cleaned_output = extract_and_print_thoughts("INTENT CLASSIFIER", raw_output)
         
-        predicted_intent = cleaned_output.strip().upper()
-        if predicted_intent not in ["SCHEME_QUERY", "PROFILE_UPDATE", "CHIT_CHAT", "DOC_RECEIVED", "APPLY_SCHEME"]:
+        # Strip potential markdown formatting
+        cleaned_output = cleaned_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[7:]
+        if cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[3:]
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-3]
+            
+        parsed_json = json.loads(cleaned_output.strip())
+        predicted_intent = parsed_json.get("intent", "CHIT_CHAT").strip().upper()
+        target_scheme_raw = parsed_json.get("target_scheme")
+
+        if predicted_intent not in ["SCHEME_QUERY", "APPLY_SCHEME", "PROFILE_UPDATE", "SKIP_DOCUMENT", "CHIT_CHAT", "DOC_RECEIVED"]:
             predicted_intent = "CHIT_CHAT"
+
+        # If APPLY_SCHEME, verify the scheme name with fuzzy search if needed
+        if predicted_intent == "APPLY_SCHEME" and target_scheme_raw and target_scheme_raw.lower() != "none":
+            # If it hallucinated or abbreviated, find the closest DB match
+            fuzzy_target = db.find_similar_scheme_name(target_scheme_raw, threshold=0.30)
+            if fuzzy_target:
+                current_target = state.get("target_scheme", "")
+                is_new_scheme = bool(current_target and current_target != fuzzy_target)
+
+                if fuzzy_target in last_schemes:
+                    resp = {"current_intent": "APPLY_SCHEME", "target_scheme": fuzzy_target}
+                else:
+                    # Let's clarify to be safe
+                    resp = {"current_intent": "CLARIFY_SCHEME_NAME", "target_scheme": fuzzy_target, "user_input_scheme": target_scheme_raw}
+                
+                # Critical Bugfix: Prevent old documents bleeding into new schemes!
+                if is_new_scheme:
+                    resp["pending_documents"] = []
+                    resp["collected_documents"] = []
+                    resp["skipped_documents"] = []
+                    resp["awaiting_document"] = ""
+                
+                return resp
+            else:
+                # Could not find a match at all
+                return {"current_intent": "CHIT_CHAT"} # Fallback if we completely fail to resolve it
+                
+        if predicted_intent == "APPLY_SCHEME":
+             return {"current_intent": "APPLY_SCHEME", "target_scheme": ""}
+
     except Exception as e:
         print(f"[Graph Error] Intent classification step failed: {e}")
         predicted_intent = "CHIT_CHAT"
@@ -454,12 +491,31 @@ def request_next_document(state: ConversationState) -> dict:
             skipped.append(awaiting)
         awaiting = ""
 
+    # ALWAYS check the application mode first — do not trust stale checkpointed pending_documents
+    # This prevents old docs from a previous scheme from bleeding into a new scheme request.
+    if target_scheme:
+        app_info = db.get_scheme_application_info(target_scheme) or {}
+        mode = app_info.get("application_mode", "unknown")
+
+        # If mode is NOT online, bypass document collection entirely — route straight to launch_automation
+        # launch_automation will handle pdf_form, physical_only, and unknown with appropriate messages
+        if mode != "online":
+            print(f"[Graph] Bypassing doc collection for '{target_scheme}' — DB mode is '{mode}'. Routing to launch_automation.")
+            return {
+                "pending_documents": [],
+                "collected_documents": [],
+                "skipped_documents": [],
+                "awaiting_document": "",
+                "current_intent": "LAUNCH_AUTOMATION"
+            }
+
     # If first time asking for docs for this scheme (pending is empty):
     manual_docs = []
     if not pending and target_scheme:
+            
         raw_docs_text = db.get_scheme_documents_needed(target_scheme)
         from core_inference.doc_requirements import parse_required_documents
-        parsed = parse_required_documents(raw_docs_text) 
+        parsed = parse_required_documents(raw_docs_text, scheme_name=target_scheme) 
         pending = parsed.get("scannable", ["aadhaar"])
         manual_docs = parsed.get("manual", [])
     
@@ -550,6 +606,18 @@ def launch_automation(state: ConversationState) -> dict:
     """Launches Phase 8 ReAct automation engine or provides physical/PDF guidelines per citizen preference."""
     target_scheme = state.get("target_scheme", "")
     user_id = state.get("user_id", "default_user")
+
+    # Guard: if we somehow got here with no scheme, ask user to clarify
+    if not target_scheme or not target_scheme.strip():
+        return {
+            "automation_status": "idle",
+            "response": (
+                "🔍 **Which scheme would you like to apply for?**\n\n"
+                "I couldn't identify the exact scheme name. Please mention it by name "
+                "(e.g. *'I want to apply for Book Bank Scheme'*) and I'll look it up for you!"
+            )
+        }
+
     vault_snapshot = state.get("vault_snapshot")
     if not vault_snapshot:
         try:
@@ -558,54 +626,86 @@ def launch_automation(state: ConversationState) -> dict:
             print(f"[Graph: launch_automation Notice] Could not fetch vault data from PostgreSQL: {e}")
             vault_snapshot = {}
 
-    # 1. Check scheme application metadata
+    # 1. Read pre-computed application mode and links from DB
     app_info = db.get_scheme_application_info(target_scheme) or {}
     mode = app_info.get("application_mode", "unknown")
-    form_url = app_info.get("application_form_url", "")
     portal_url = app_info.get("portal_url", "")
-
-    # If unknown or missing, run targeted on-demand scrape and classification
-    if not mode or mode == "unknown" or not form_url:
+    
+    # Parse application_links JSONB (pre-computed by classify_modes.py)
+    app_links_raw = app_info.get("application_links") or {}
+    if isinstance(app_links_raw, str):
+        import json as _json
         try:
-            from data_extraction.migrate_and_update_schemes import update_scheme_application_metadata
-            if portal_url:
-                scraped_meta = update_scheme_application_metadata(target_scheme, portal_url)
-                mode = scraped_meta.get("application_mode", "unknown")
-                form_url = scraped_meta.get("application_form_url", "")
-                app_info.update(scraped_meta)
-        except Exception as e:
-            print(f"[Graph: launch_automation Notice] On-demand scrape attempt skipped/failed: {e}")
+            app_links_raw = _json.loads(app_links_raw)
+        except Exception:
+            app_links_raw = {}
+    
+    online_link = app_links_raw.get("online_link", "") or ""
+    pdf_links = app_links_raw.get("pdf_links", []) or []
+    fallback_link = app_links_raw.get("fallback_link", "") or ""
 
-    print(f"[Graph: launch_automation] Scheme: '{target_scheme}' | Mode: {mode.upper()} | Form URL: {form_url}")
+    print(f"[Graph: launch_automation] Scheme: '{target_scheme}' | Mode: {mode.upper()} | Online: {online_link} | PDFs: {len(pdf_links)}")
 
-    # 2. Handle non-online modes per citizen preference (no PDF coordinate manipulation scope creep!)
-    if mode == "pdf_form" or (form_url and form_url.lower().endswith(".pdf")):
+    # 2. Handle PDF mode — send ALL PDF links to the user
+    if mode == "pdf_form" and pdf_links:
+        pdf_links_text = "\n".join([f"📎 [Download Form {i+1}]({url})" for i, url in enumerate(pdf_links)])
+        fallback_text = f"\n\n**Official Scheme Page:** [View Details]({fallback_link or portal_url})" if (fallback_link or portal_url) else ""
         return {
             "application_mode": "pdf_form",
-            "application_form_url": form_url,
+            "application_form_url": pdf_links[0],
             "automation_status": "idle",
             "response": (
-                f"[PDF Form Required] **Physical Submission Required for {target_scheme}**\n\n"
-                "This scheme does not support online application filling. However, your documents and details are securely stored in your Vault.\n\n"
-                f"**Official PDF Application Form:** [Download Form Here]({form_url})\n\n"
-                "Please print out the form, fill it using your verified details, attach your document photocopies, and submit it directly to your local Panchayat/Taluk or designated departmental office."
-            )
-        }
-    elif mode == "physical_only":
-        return {
-            "application_mode": "physical_only",
-            "application_form_url": portal_url,
-            "automation_status": "idle",
-            "response": (
-                f"[Physical Submission Required] **Physical Submission Required for {target_scheme}**\n\n"
-                "This scheme only accepts in-person applications at government offices. No online web portal is available.\n\n"
-                f"**Official Scheme & Process Guidelines:** [View Guidelines]({portal_url})\n\n"
-                "Please visit your nearest e-Sevai Kendra or departmental office with the documents verified in your Yojana Mitra Vault."
+                f"📋 **Application Form(s) for {target_scheme}**\n\n"
+                "This scheme requires a physical application. Download the form(s) below, "
+                "fill them using your verified details from your Yojana Mitra Vault, and submit at your local government office.\n\n"
+                f"{pdf_links_text}"
+                f"{fallback_text}\n\n"
+                "📍 Submit your completed form at your nearest **e-Sevai Kendra**, **Taluk Office**, or the relevant departmental office."
             )
         }
 
-    # 3. Mode is ONLINE (or fallback with portal URL) → Launch ReAct Automation Graph!
-    target_url = form_url or portal_url
+    # 3. Handle physical_only mode
+    if mode == "physical_only":
+        ref_link = fallback_link or portal_url
+        return {
+            "application_mode": "physical_only",
+            "application_form_url": ref_link,
+            "automation_status": "idle",
+            "response": (
+                f"🏛️ **Physical Submission Required for {target_scheme}**\n\n"
+                "This scheme only accepts in-person applications at government offices. "
+                "No online portal or downloadable form is currently available.\n\n"
+                + (f"**Official Reference:** [View Scheme Details]({ref_link})\n\n" if ref_link else "")
+                + "📍 Please visit your nearest **e-Sevai Kendra** or the relevant departmental office "
+                "with the documents verified in your Yojana Mitra Vault."
+            )
+        }
+
+    # 4. Handle unknown mode — give user whatever info we have
+    if mode == "unknown":
+        ref_link = fallback_link or portal_url
+        try:
+            raw_docs = db.get_scheme_documents_needed(target_scheme) or ""
+            docs_section = f"\n\n📋 **Documents you'll typically need:**\n{raw_docs.strip()}" if raw_docs.strip() else ""
+        except Exception:
+            docs_section = ""
+        return {
+            "application_mode": "unknown",
+            "application_form_url": ref_link,
+            "automation_status": "idle",
+            "response": (
+                f"🏛️ **How to Apply: {target_scheme}**\n\n"
+                "This scheme does **not** have an online application portal. "
+                "You'll need to apply in-person at your nearest government office."
+                f"{docs_section}\n\n"
+                + (f"📎 **Official Scheme Page:** [View Details]({ref_link})\n\n" if ref_link else "")
+                + "📍 Please visit your nearest **e-Sevai Kendra**, **Taluk Office**, or the relevant departmental office to submit your application."
+            )
+        }
+
+
+    # 5. Mode is ONLINE → Launch ReAct Automation Graph!
+    target_url = online_link or portal_url
     if not target_url:
         return {
             "automation_status": "error",

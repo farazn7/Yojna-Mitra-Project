@@ -42,7 +42,7 @@ def init_db():
             updated_at TIMESTAMP DEFAULT NOW(),
             expires_at TIMESTAMP NOT NULL,
             CONSTRAINT fk_vault_user FOREIGN KEY (user_id) 
-                REFERENCES user_profiles(platform_id) ON DELETE CASCADE
+                REFERENCES user_profiles(platform_id) ON DELETE CASCADE ON UPDATE CASCADE
         );
     """)
     
@@ -211,6 +211,30 @@ def find_similar_scheme_name(query: str, threshold: float = 0.25) -> str:
     clean_q = re.sub(r'(?i).*\b(apply for|application for|register for|avail of|help with applying for|applying for|apply to)\s+', '', clean_q).strip(' .?!')
     if not clean_q:
         clean_q = query.strip()
+    
+    # Acronym/abbreviation search: if query is short or all-caps, check if it appears as acronym in parentheses
+    # e.g. user types "PEACE" → matches "Promotion of Energy Audit... (PEACE)"
+    try:
+        conn_acr = psycopg2.connect(**DB_PARAMS)
+        cur_acr = conn_acr.cursor()
+        cur_acr.execute("""
+            SELECT scheme_name FROM government_schemes
+            WHERE scheme_name ILIKE %s
+            LIMIT 1;
+        """, (f"%(  {clean_q}  )%",))
+        # Try broader: any occurrence of the word in parens
+        cur_acr.execute("""
+            SELECT scheme_name FROM government_schemes
+            WHERE scheme_name ~* %s
+            LIMIT 1;
+        """, (f'\\({re.escape(clean_q)}\\)',))
+        acr_row = cur_acr.fetchone()
+        cur_acr.close()
+        conn_acr.close()
+        if acr_row and acr_row[0]:
+            return acr_row[0]
+    except Exception:
+        pass
         
     try:
         conn = psycopg2.connect(**DB_PARAMS)
@@ -257,16 +281,33 @@ def find_similar_scheme_name(query: str, threshold: float = 0.25) -> str:
         s_words = set(w.lower() for w in re.findall(r'\w+', s) if len(w) > 3)
         if q_words and s_words:
             overlap = len(q_words.intersection(s_words))
+            if overlap > best_score:
+                best_score = overlap
+                best_scheme = s
     return best_scheme
 
 
 def get_scheme_application_info(scheme_name: str) -> dict | None:
-    """Fetches application_mode, application_form_url, portal_url, and application_process for a scheme."""
+    """Fetches scheme info for application routing. Only queries columns that exist in the DB."""
     try:
         conn = psycopg2.connect(**DB_PARAMS, cursor_factory=RealDictCursor)
         cur = conn.cursor()
+        
+        # First check what columns actually exist
         cur.execute("""
-            SELECT scheme_name, portal_url, application_mode, application_form_url, application_process
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'government_schemes';
+        """)
+        existing_cols = {row['column_name'] for row in cur.fetchall()}
+        
+        # Build SELECT with only existing columns
+        select_cols = ["scheme_name", "portal_url"]
+        for optional_col in ["application_mode", "application_form_url", "application_process", "application_links"]:
+            if optional_col in existing_cols:
+                select_cols.append(optional_col)
+        
+        cur.execute(f"""
+            SELECT {', '.join(select_cols)}
             FROM government_schemes
             WHERE LOWER(scheme_name) = LOWER(%s) OR scheme_name ILIKE %s
             LIMIT 1;
@@ -274,18 +315,34 @@ def get_scheme_application_info(scheme_name: str) -> dict | None:
         row = cur.fetchone()
         cur.close()
         conn.close()
-        return dict(row) if row else None
+        
+        if not row:
+            return None
+        result = dict(row)
+        # Provide safe defaults for missing columns
+        result.setdefault("application_mode", "unknown")
+        result.setdefault("application_form_url", "")
+        result.setdefault("application_process", "")
+        return result
     except Exception as e:
         print(f"[DB Error in get_scheme_application_info] {e}")
         return None
 
 
 def update_scheme_application_info(scheme_name: str, mode: str, form_url: str, process: str):
-    """Updates application_mode, application_form_url, and application_process for a scheme."""
+    """Updates application_mode, application_form_url, and application_process for a scheme. Creates columns if missing."""
     try:
         conn = psycopg2.connect(**DB_PARAMS)
         conn.autocommit = True
         cur = conn.cursor()
+        
+        # Ensure columns exist before updating
+        for col_name, col_type in [("application_mode", "TEXT"), ("application_form_url", "TEXT"), ("application_process", "TEXT")]:
+            try:
+                cur.execute(f"ALTER TABLE government_schemes ADD COLUMN IF NOT EXISTS {col_name} {col_type};")
+            except Exception:
+                pass
+        
         cur.execute("""
             UPDATE government_schemes
             SET application_mode = %s,
@@ -297,3 +354,36 @@ def update_scheme_application_info(scheme_name: str, mode: str, form_url: str, p
         conn.close()
     except Exception as e:
         print(f"[DB Error in update_scheme_application_info] {e}")
+
+
+def get_scheme_sources_references(scheme_name: str) -> list:
+    """Fetches the raw sources_references JSONB array for a scheme. Returns [] if column/data missing."""
+    try:
+        conn = psycopg2.connect(**DB_PARAMS)
+        cur = conn.cursor()
+        
+        # Check if column exists first
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'government_schemes' AND column_name = 'sources_references';
+        """)
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            return []
+        
+        cur.execute("""
+            SELECT sources_references FROM government_schemes
+            WHERE LOWER(scheme_name) = LOWER(%s) OR scheme_name ILIKE %s
+            LIMIT 1;
+        """, (scheme_name.strip(), f"%{scheme_name.strip()}%"))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if row and row[0]:
+            return row[0] if isinstance(row[0], list) else json.loads(row[0])
+        return []
+    except Exception as e:
+        print(f"[DB Error in get_scheme_sources_references] {e}")
+        return []

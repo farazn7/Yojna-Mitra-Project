@@ -145,19 +145,44 @@ def update_user_manifest(user_id: str, doc_type: str, file_path: str, status: st
     except Exception as e:
         print(f"[Manifest Update Error] Could not update user_manifest.md for {user_id}: {e}")
 
-async def download_and_process(attachment: discord.Attachment, user_id: str, sanitize_for_portal: bool = False, doc_type_label: str = "unknown") -> tuple[bool, str]:
-    """The Main Orchestrator: Downloads, verifies, and optionally sanitizes for govt portal upload.
+async def download_and_process_file(file_path: str, filename: str, file_size: int, user_id: str, sanitize_for_portal: bool = False, doc_type_label: str = "unknown") -> tuple[bool, str]:
+    """The Main Orchestrator: Platform-agnostic version that takes an already-downloaded file path."""
+    # Layer 1 equivalent check
+    if file_size > MAX_FILE_SIZE:
+        return False, f"❌ File too large ({file_size // 1024 // 1024}MB). Maximum is 10MB."
     
-    By default (sanitize_for_portal=False), keeps the crisp high-res original image for AI Vision extraction.
-    When sanitize_for_portal=True, strips EXIF and compresses to 20-100KB JPG for strict govt portals.
-    """
-    # Run Layer 1
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return False, f"❌ Unsupported format `{ext}`. Please send PDF, JPG, or PNG files only."
+
+    try:
+        # Run Layer 2
+        if not verify_file_integrity(file_path):
+            os.remove(file_path)
+            return False, "❌ File integrity check failed. The file appears to be corrupted or disguised."
+            
+        # Run Layer 3 ONLY if explicitly requested for govt portal upload
+        if sanitize_for_portal:
+            final_path = sanitize_for_govt_portal(file_path)
+            update_user_manifest(user_id, doc_type_label, final_path, status="Sanitized for Portal", details="Compressed 20-100KB, EXIF stripped")
+            return True, final_path
+            
+        update_user_manifest(user_id, doc_type_label, file_path, status="Verified & Saved", details="Original high-res format preserved")
+        return True, file_path
+        
+    except Exception as e:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        print(f"[File Handling Error] User: {user_id} | Exception: {str(e)}")
+        return False, f"❌ Failed to process document securely: {str(e)}"
+
+async def download_and_process(attachment: discord.Attachment, user_id: str, sanitize_for_portal: bool = False, doc_type_label: str = "unknown") -> tuple[bool, str]:
+    """Discord-specific wrapper: Downloads from Discord CDN, then delegates to platform-agnostic function."""
     is_valid, error_msg = validate_attachment(attachment)
     if not is_valid:
         return False, error_msg
         
     ext = os.path.splitext(attachment.filename)[1].lower()
-    # Create a unique timestamp so files never overwrite each other
     timestamp = int(time.time())
     clean_label = re.sub(r'[^a-zA-Z0-9_]', '_', doc_type_label.lower().strip())
     
@@ -165,27 +190,18 @@ async def download_and_process(attachment: discord.Attachment, user_id: str, san
     temp_file_path = os.path.join(user_dir, f"{clean_label}_{timestamp}_raw{ext}")
     
     try:
-        # Actually download the file from Discord
         await attachment.save(temp_file_path)
-        
-        # Run Layer 2
-        if not verify_file_integrity(temp_file_path):
-            os.remove(temp_file_path)
-            return False, "❌ File integrity check failed. The file appears to be corrupted or disguised."
-            
-        # Run Layer 3 ONLY if explicitly requested for govt portal upload
-        if sanitize_for_portal:
-            final_path = sanitize_for_govt_portal(temp_file_path)
-            update_user_manifest(user_id, doc_type_label, final_path, status="Sanitized for Portal", details="Compressed 20-100KB, EXIF stripped")
-            return True, final_path
-            
-        update_user_manifest(user_id, doc_type_label, temp_file_path, status="Downloaded & Verified", details="High-res raw image kept for Vision LLM")
-        return True, temp_file_path
-        
+        return await download_and_process_file(
+            file_path=temp_file_path,
+            filename=attachment.filename,
+            file_size=attachment.size,
+            user_id=user_id,
+            sanitize_for_portal=sanitize_for_portal,
+            doc_type_label=doc_type_label
+        )
     except Exception as e:
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-        return False, f"❌ Failed to process document: {str(e)}"
+        print(f"[Discord Download Error] {e}")
+        return False, "❌ Failed to download file from Discord servers."
 
 def find_document_file(user_id: str, doc_type: str) -> str | None:
     """Finds the most recent file matching {doc_type}_* in temp_documents/{user_id}/.
