@@ -1,0 +1,200 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Yojana Mitra — Autonomous Government Scheme Navigator</title>
+  <meta name="description" content="Yojana Mitra is an AI assistant that finds the government schemes you qualify for and autonomously fills out the application portals for you.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--violet:#7c3aed;--violet-light:#a78bfa;--blue:#3b82f6;--blue-light:#60a5fa;--bg:#080810;--surface:#0f0f1a;--surface-2:#161625;--border:rgba(255,255,255,0.08);--text:#f1f1f5;--muted:#8b8ba7}
+    html{scroll-behavior:smooth}
+    body{font-family:'Inter',sans-serif;background-color:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+    .glow-orb{position:absolute;border-radius:50%;filter:blur(100px);pointer-events:none}
+    .orb-1{width:700px;height:700px;background:radial-gradient(circle,rgba(124,58,237,0.2) 0%,transparent 70%);top:-250px;left:50%;transform:translateX(-50%)}
+    .orb-2{width:450px;height:450px;background:radial-gradient(circle,rgba(59,130,246,0.14) 0%,transparent 70%);top:55%;right:-120px}
+    header{position:sticky;top:0;z-index:50;border-bottom:1px solid var(--border);background:rgba(8,8,16,0.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+    nav{max-width:1100px;margin:0 auto;padding:0 24px;height:64px;display:flex;align-items:center;justify-content:space-between}
+    .nav-logo{display:flex;align-items:center;gap:10px;text-decoration:none}
+    .nav-logo img{height:36px;width:36px;border-radius:8px;object-fit:cover}
+    .nav-logo span{font-size:17px;font-weight:700;color:var(--text);letter-spacing:-0.3px}
+    .nav-links{display:flex;align-items:center;gap:32px;list-style:none}
+    .nav-links a{font-size:14px;font-weight:500;color:var(--muted);text-decoration:none;transition:color 0.2s}
+    .nav-links a:hover{color:var(--text)}
+    .nav-cta{font-size:13px;font-weight:600;padding:8px 18px;border-radius:999px;background:linear-gradient(135deg,var(--violet),var(--blue));color:#fff;text-decoration:none;transition:opacity 0.2s,transform 0.2s}
+    .nav-cta:hover{opacity:0.88;transform:translateY(-1px)}
+    .hamburger{display:none;flex-direction:column;gap:5px;cursor:pointer;background:none;border:none;padding:4px}
+    .hamburger span{display:block;width:22px;height:2px;background:var(--text);border-radius:2px;transition:transform 0.25s,opacity 0.25s}
+    .hamburger.open span:nth-child(1){transform:translateY(7px) rotate(45deg)}
+    .hamburger.open span:nth-child(2){opacity:0}
+    .hamburger.open span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
+    #mobile-menu{display:none;flex-direction:column;padding:12px 24px 16px;border-top:1px solid var(--border);background:rgba(8,8,16,0.97);gap:2px}
+    #mobile-menu.open{display:flex}
+    #mobile-menu a{font-size:15px;font-weight:500;color:var(--muted);text-decoration:none;padding:10px 12px;border-radius:10px;transition:background 0.2s,color 0.2s}
+    #mobile-menu a:hover{background:rgba(255,255,255,0.05);color:var(--text)}
+    .hero{position:relative;padding:100px 24px 80px;text-align:center;overflow:hidden}
+    .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:rgba(255,255,255,0.04);padding:6px 16px;border-radius:999px;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:28px}
+    .badge-dot{width:7px;height:7px;border-radius:50%;background:#34d399;animation:pulse 2s infinite}
+    @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,0.5)}50%{box-shadow:0 0 0 6px rgba(52,211,153,0)}}
+    h1{font-size:clamp(36px,6vw,68px);font-weight:900;line-height:1.07;letter-spacing:-2px;max-width:800px;margin:0 auto}
+    .gradient-text{background:linear-gradient(100deg,var(--violet-light),var(--blue-light));-webkit-background-clip:text;background-clip:text;color:transparent}
+    .hero-sub{margin:24px auto 0;max-width:560px;font-size:17px;line-height:1.65;color:var(--muted)}
+    .cta-row{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:40px;flex-wrap:wrap}
+    .btn{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;padding:12px 24px;border-radius:999px;text-decoration:none;transition:transform 0.2s,opacity 0.2s;white-space:nowrap}
+    .btn:hover{transform:translateY(-2px);opacity:0.9}
+    .btn-telegram{background:#26A5E4;color:#fff;box-shadow:0 8px 30px rgba(38,165,228,0.28)}
+    .btn-discord{background:#5865F2;color:#fff;box-shadow:0 8px 30px rgba(88,101,242,0.28)}
+    .btn-ghost{background:rgba(255,255,255,0.06);color:var(--text);border:1px solid var(--border)}
+    .platform-icon{width:18px;height:18px;fill:currentColor}
+    .video-wrapper{max-width:920px;margin:64px auto 0;border-radius:20px;border:1px solid var(--border);background:var(--surface);padding:6px;box-shadow:0 40px 120px rgba(0,0,0,0.6)}
+    .video-inner{border-radius:15px;overflow:hidden;aspect-ratio:16/9;background:#000}
+    .video-inner video{width:100%;height:100%;object-fit:cover;display:block}
+    section{position:relative;z-index:1}
+    #how-it-works{padding:100px 24px}
+    .section-label{font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--violet-light);margin-bottom:12px}
+    .section-title{font-size:clamp(26px,4vw,40px);font-weight:800;letter-spacing:-1px;line-height:1.15}
+    .section-sub{margin-top:14px;font-size:16px;color:var(--muted);line-height:1.65;max-width:520px}
+    .section-header{text-align:center;margin-bottom:60px}
+    .section-header .section-sub{margin:14px auto 0}
+    .steps-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;max-width:1100px;margin:0 auto}
+    .step-card{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:36px 32px;transition:border-color 0.3s,transform 0.3s}
+    .step-card:hover{border-color:rgba(124,58,237,0.4);transform:translateY(-4px)}
+    .step-num{font-size:11px;font-weight:800;letter-spacing:2px;color:var(--violet-light);margin-bottom:20px}
+    .step-icon{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,rgba(124,58,237,0.15),rgba(59,130,246,0.15));display:flex;align-items:center;justify-content:center;margin-bottom:20px}
+    .step-icon svg{width:22px;height:22px;stroke:var(--violet-light);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+    .step-card h3{font-size:17px;font-weight:700;margin-bottom:10px;letter-spacing:-0.3px}
+    .step-card p{font-size:14px;line-height:1.7;color:var(--muted)}
+    #architecture{padding:60px 24px;border-top:1px solid var(--border)}
+    .stack-inner{max-width:1100px;margin:0 auto;text-align:center}
+    .stack-label{font-size:11px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:28px}
+    .stack-pills{display:flex;flex-wrap:wrap;justify-content:center;gap:10px}
+    .pill{font-size:13px;font-weight:600;color:var(--muted);background:var(--surface-2);border:1px solid var(--border);padding:8px 20px;border-radius:999px;transition:color 0.2s,border-color 0.2s}
+    .pill:hover{color:var(--text);border-color:rgba(167,139,250,0.4)}
+    footer{border-top:1px solid var(--border);padding:28px 24px}
+    .footer-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+    .footer-inner p{font-size:13px;color:var(--muted)}
+    .footer-links{display:flex;gap:20px}
+    .footer-links a{font-size:13px;color:var(--muted);text-decoration:none;transition:color 0.2s}
+    .footer-links a:hover{color:var(--text)}
+    @media(max-width:768px){.nav-links,.nav-cta{display:none}.hamburger{display:flex}.steps-grid{grid-template-columns:1fr}h1{letter-spacing:-1.5px}}
+    @media(max-width:480px){.hero{padding:72px 20px 60px}.btn{width:100%;justify-content:center}.cta-row{flex-direction:column}}
+    .reveal{opacity:0;transform:translateY(24px);transition:opacity 0.6s ease,transform 0.6s ease}
+    .reveal.visible{opacity:1;transform:translateY(0)}
+  </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="#" class="nav-logo">
+        <img src="assets/logo.png" alt="Yojana Mitra Logo">
+        <span>Yojana Mitra</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="#how-it-works">How it Works</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="https://github.com" target="_blank" rel="noopener">GitHub</a></li>
+      </ul>
+      <a href="#how-it-works" class="nav-cta">Get Started</a>
+      <button class="hamburger" id="menu-toggle" aria-label="Toggle menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </nav>
+    <div id="mobile-menu">
+      <a href="#how-it-works">How it Works</a>
+      <a href="#architecture">Architecture</a>
+      <a href="https://github.com" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="glow-orb orb-1"></div>
+    <div class="glow-orb orb-2"></div>
+    <div class="badge"><span class="badge-dot"></span>Live on Telegram &amp; Discord</div>
+    <h1>Your AI Friend for<br><span class="gradient-text">Government Schemes.</span></h1>
+    <p class="hero-sub">Yojana Mitra finds the welfare schemes you qualify for and autonomously navigates the application portals — all through a simple chat.</p>
+    <div class="cta-row">
+      <a href="#" class="btn btn-telegram">
+        <svg class="platform-icon" viewBox="0 0 24 24"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12l-6.871 4.326-2.962-.924c-.643-.204-.657-.643.136-.953l11.57-4.461c.537-.194 1.006.131.833.941z"/></svg>
+        Chat on Telegram
+      </a>
+      <a href="#" class="btn btn-discord">
+        <svg class="platform-icon" viewBox="0 0 24 24"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057.1 18.08.112 18.1.131 18.11a19.893 19.893 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
+        Add to Discord
+      </a>
+      <a href="#how-it-works" class="btn btn-ghost">See How It Works</a>
+    </div>
+    <div class="video-wrapper reveal">
+      <div class="video-inner">
+        <video src="assets/demo.mp4" controls playsinline preload="metadata" aria-label="Yojana Mitra demo video"></video>
+      </div>
+    </div>
+  </section>
+
+  <section id="how-it-works">
+    <div class="section-header reveal">
+      <p class="section-label">Process</p>
+      <h2 class="section-title">Three steps to your benefit.</h2>
+      <p class="section-sub">From a simple conversation to a submitted government application — entirely hands-free.</p>
+    </div>
+    <div class="steps-grid">
+      <div class="step-card reveal">
+        <p class="step-num">01</p>
+        <div class="step-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <h3>Tell us about yourself</h3>
+        <p>Just text the bot your basic details in plain English or Hindi. No forms, no portals, no jargon.</p>
+      </div>
+      <div class="step-card reveal">
+        <p class="step-num">02</p>
+        <div class="step-icon"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+        <h3>Secure your documents</h3>
+        <p>Upload a photo of your Aadhaar or other documents. Our local Vision AI extracts and encrypts your data — it never leaves your machine.</p>
+      </div>
+      <div class="step-card reveal">
+        <p class="step-num">03</p>
+        <div class="step-icon"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+        <h3>AI fills the application</h3>
+        <p>Yojana Mitra navigates the government portal, fills every field, and pauses for your final CONFIRM before submitting.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="architecture">
+    <div class="stack-inner">
+      <p class="stack-label">Powered By</p>
+      <div class="stack-pills">
+        <span class="pill">LangGraph</span>
+        <span class="pill">Playwright</span>
+        <span class="pill">PostgreSQL + pgvector</span>
+        <span class="pill">Ollama / Local LLMs</span>
+        <span class="pill">Vision AI (OCR)</span>
+        <span class="pill">Telegram Bot API</span>
+        <span class="pill">Discord.py</span>
+        <span class="pill">Python</span>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="footer-inner">
+      <p>&copy; 2026 Yojana Mitra. All rights reserved.</p>
+      <div class="footer-links">
+        <a href="https://github.com" target="_blank" rel="noopener">GitHub</a>
+        <a href="#">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const toggle = document.getElementById('menu-toggle');
+    const mobileMenu = document.getElementById('mobile-menu');
+    function closeMenu(){mobileMenu.classList.remove('open');toggle.classList.remove('open');toggle.setAttribute('aria-expanded','false')}
+    toggle.addEventListener('click',()=>{const o=mobileMenu.classList.toggle('open');toggle.classList.toggle('open',o);toggle.setAttribute('aria-expanded',String(o))});
+    mobileMenu.querySelectorAll('a').forEach(l=>l.addEventListener('click',closeMenu));
+    window.addEventListener('resize',()=>{if(window.innerWidth>=768)closeMenu()});
+    const obs=new IntersectionObserver((entries)=>{entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');obs.unobserve(e.target)}})},{threshold:0.12});
+    document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=`${i*60}ms`;obs.observe(el)});
+  </script>
+</body>
+</html>
