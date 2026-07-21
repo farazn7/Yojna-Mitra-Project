@@ -35,9 +35,11 @@
     #mobile-menu a{font-size:15px;font-weight:500;color:var(--muted);text-decoration:none;padding:10px 12px;border-radius:10px;transition:background 0.2s,color 0.2s}
     #mobile-menu a:hover{background:rgba(255,255,255,0.05);color:var(--text)}
     .hero{position:relative;padding:100px 24px 80px;text-align:center;overflow:hidden}
-    .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:rgba(255,255,255,0.04);padding:6px 16px;border-radius:999px;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:28px}
+    .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:rgba(255,255,255,0.04);padding:6px 16px;border-radius:999px;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:28px;transition:opacity 0.3s}
     .badge-dot{width:7px;height:7px;border-radius:50%;background:#34d399;animation:pulse 2s infinite}
+    .badge.offline .badge-dot{background:#ef4444;animation:pulse-offline 2s infinite}
     @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,0.5)}50%{box-shadow:0 0 0 6px rgba(52,211,153,0)}}
+    @keyframes pulse-offline{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.5)}50%{box-shadow:0 0 0 6px rgba(239,68,68,0)}}
     h1{font-size:clamp(36px,6vw,68px);font-weight:900;line-height:1.07;letter-spacing:-2px;max-width:800px;margin:0 auto}
     .gradient-text{background:linear-gradient(100deg,var(--violet-light),var(--blue-light));-webkit-background-clip:text;background-clip:text;color:transparent}
     .hero-sub{margin:24px auto 0;max-width:560px;font-size:17px;line-height:1.65;color:var(--muted)}
@@ -111,7 +113,7 @@
   <section class="hero">
     <div class="glow-orb orb-1"></div>
     <div class="glow-orb orb-2"></div>
-    <div class="badge"><span class="badge-dot"></span>Live on Telegram &amp; Discord</div>
+    <div class="badge" id="status-badge" style="opacity: 0;"><span class="badge-dot"></span><span id="status-text">Checking Status...</span></div>
     <h1>Your AI Friend for<br><span class="gradient-text">Government Schemes.</span></h1>
     <p class="hero-sub">Yojana Mitra finds the welfare schemes you qualify for and autonomously navigates the application portals — all through a simple chat.</p>
     <div class="cta-row">
@@ -195,6 +197,30 @@
     window.addEventListener('resize',()=>{if(window.innerWidth>=768)closeMenu()});
     const obs=new IntersectionObserver((entries)=>{entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');obs.unobserve(e.target)}})},{threshold:0.12});
     document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=`${i*60}ms`;obs.observe(el)});
+
+    // Dynamic Status Checking
+    async function checkStatus() {
+      const badge = document.getElementById('status-badge');
+      const text = document.getElementById('status-text');
+      try {
+        const res = await fetch('https://healthchecks.io/badge/4f201385-8620-4855-b169-c7ff83/U0hh07F2-2.json');
+        const data = await res.json();
+        
+        if (data.status === 'up') {
+          badge.classList.remove('offline');
+          text.innerHTML = 'Live on Telegram &amp; Discord';
+        } else {
+          badge.classList.add('offline');
+          const down = data.down || 0;
+          text.innerHTML = down === 1 ? '1 Bot Currently Offline' : 'Bots Currently Offline';
+        }
+      } catch (e) {
+        text.innerHTML = 'Live on Telegram &amp; Discord'; // Fallback
+      }
+      badge.style.opacity = '1';
+    }
+    checkStatus();
+    setInterval(checkStatus, 60000);
   </script>
 </body>
 </html>

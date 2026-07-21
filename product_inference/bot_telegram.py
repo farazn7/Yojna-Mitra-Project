@@ -2,6 +2,20 @@ import os
 import asyncio
 import time
 from dotenv import load_dotenv
+import threading
+import urllib.request
+
+def start_heartbeat():
+    def pinger():
+        while True:
+            try:
+                urllib.request.urlopen("https://hc-ping.com/6f985ce4-0f9d-40ab-9b0f-d3dd68cd2957", timeout=10)
+            except Exception:
+                pass
+            time.sleep(60)
+    threading.Thread(target=pinger, daemon=True).start()
+
+start_heartbeat()
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 

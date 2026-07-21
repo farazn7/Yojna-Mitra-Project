@@ -4,6 +4,22 @@ import signal
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+import threading
+import urllib.request
+import time
+
+def start_heartbeat():
+    def pinger():
+        while True:
+            try:
+                urllib.request.urlopen("https://hc-ping.com/c38c6455-a777-4a12-b524-8b8dec9ef57d", timeout=10)
+            except Exception:
+                pass
+            time.sleep(60)
+    threading.Thread(target=pinger, daemon=True).start()
+
+# Start pinging in the background immediately
+start_heartbeat()
 
 # Import database initializer and compiled LangGraph runtime
 import product_inference.db as db
