@@ -198,24 +198,35 @@
     const obs=new IntersectionObserver((entries)=>{entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');obs.unobserve(e.target)}})},{threshold:0.12});
     document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=`${i*60}ms`;obs.observe(el)});
 
-    // Dynamic Status Checking
+    // Dynamic Status Checking — calls our serverless proxy (key stays server-side)
     async function checkStatus() {
       const badge = document.getElementById('status-badge');
-      const text = document.getElementById('status-text');
+      const text  = document.getElementById('status-text');
       try {
-        const res = await fetch('https://healthchecks.io/badge/4f201385-8620-4855-b169-c7ff83/U0hh07F2-2.json');
+        const res  = await fetch('/api/status');
         const data = await res.json();
-        
-        if (data.status === 'up') {
+
+        const tg  = data.telegram; // 'up', 'down', 'new', 'grace', 'paused', 'unknown'
+        const dc  = data.discord;
+
+        const tgUp = tg === 'up' || tg === 'grace';
+        const dcUp = dc === 'up' || dc === 'grace';
+
+        if (tgUp && dcUp) {
           badge.classList.remove('offline');
           text.innerHTML = 'Live on Telegram &amp; Discord';
+        } else if (!tgUp && !dcUp) {
+          badge.classList.add('offline');
+          text.textContent = 'Servers Offline';
+        } else if (!tgUp) {
+          badge.classList.add('offline');
+          text.textContent = 'Telegram Offline';
         } else {
           badge.classList.add('offline');
-          const down = data.down || 0;
-          text.innerHTML = down === 1 ? '1 Bot Currently Offline' : 'Bots Currently Offline';
+          text.textContent = 'Discord Offline';
         }
       } catch (e) {
-        text.innerHTML = 'Live on Telegram &amp; Discord'; // Fallback
+        // Network error or API not deployed yet — keep badge hidden
       }
       badge.style.opacity = '1';
     }
