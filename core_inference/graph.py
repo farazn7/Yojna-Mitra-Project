@@ -51,6 +51,7 @@ class ConversationState(TypedDict):
     response: str                            # Final message to pass back to Discord
     # ── Document Collection State ──
     target_scheme: str                       # Name of scheme user wants to apply for
+    scheme_for_pending_docs: str             # Tracks which scheme the current pending_documents array belongs to
     pending_documents: list                  # ["aadhaar", "income_certificate", "land_record"]
     collected_documents: list                # ["aadhaar"] — docs already in vault
     skipped_documents: list                  #  NEW: ["pan_card"] — docs user explicitly skipped
@@ -88,130 +89,19 @@ def load_user_profile(state: ConversationState) -> dict:
     }
 
 
-def onboarding_handler(state: ConversationState) -> dict:
-    """Processes full questionnaire flow, validates numeric constraints, and executes dual-writes."""
-    step = state.get("onboarding_step", "START")
-    profile = dict(state.get("user_profile", {}))
-    user_id = state["user_id"]
-    
-    user_input = ""
-    if state["messages"]:
-        latest_msg = state["messages"][-1]
-        user_input = latest_msg.content.strip() if hasattr(latest_msg, "content") else latest_msg.get("content", "").strip()
+def is_profile_complete(profile: dict) -> bool:
+    """Checks if the minimum required profile fields are present."""
+    required = {"gender", "age", "income", "caste", "occupation"}
+    return bool(profile) and required.issubset(profile.keys())
 
-    next_step = step
-    response_text = ""
-
-    if step == "START":
-        next_step = "AWAITING_GENDER"
-        response_text = "Welcome to Yojana Mitra! Let's get you set up to find matching schemes. 🇮🇳\n\n**Step 1:** What is your **Gender**? (e.g., Male, Female, Other)"
-        
-    elif step == "AWAITING_GENDER":
-        profile["gender"] = user_input
-        next_step = "AWAITING_AGE"
-        response_text = "**Step 2:** What is your **Age**? (Numbers only)"
-        
-    elif step == "AWAITING_AGE":
-        if user_input.isdigit():
-            profile["age"] = int(user_input)
-            next_step = "AWAITING_INCOME"
-            response_text = "**Step 3:** What is your total annual family **Income** in INR? (Numbers only, e.g., 45000)"
-        else:
-            response_text = "❌ Please enter a valid numeric age:"
-            
-    elif step == "AWAITING_INCOME":
-        if user_input.isdigit():
-            profile["income"] = int(user_input)
-            next_step = "AWAITING_CASTE"
-            response_text = "**Step 4:** What is your **Caste** category? (e.g., General, OBC, SC, ST)"
-        else:
-            response_text = "❌ Please enter a valid number for income:"
-
-    elif step == "AWAITING_CASTE":
-        profile["caste"] = user_input
-        next_step = "AWAITING_RESIDENCE"
-        response_text = "**Step 5:** What is your area of **Residence**? (Rural / Urban)"
-
-    elif step == "AWAITING_RESIDENCE":
-        profile["residence"] = user_input
-        next_step = "AWAITING_MARITAL"
-        response_text = "**Step 6:** What is your **Marital Status**? (e.g., Single, Married, Widowed, Divorced)"
-
-    elif step == "AWAITING_MARITAL":
-        profile["marital_status"] = user_input
-        next_step = "AWAITING_DISABLED"
-        response_text = "**Step 7:** Are you **Differently Abled**? (Yes / No)"
-
-    elif step == "AWAITING_DISABLED":
-        is_disabled = user_input.lower() in ['yes', 'y', 'true']
-        if is_disabled:
-            profile["differently_abled"] = True
-            next_step = "AWAITING_DISABILITY_PERC"
-            response_text = "**Step 7b:** What is your **Disability Percentage**? (Enter number, or type 'None')"
-        else:
-            profile["differently_abled"] = False
-            profile["disability_percentage"] = None
-            next_step = "AWAITING_MINORITY"
-            response_text = "**Step 8:** Do you belong to a **Minority** community? (Yes / No)"
-
-    elif step == "AWAITING_DISABILITY_PERC":
-        perc = int(user_input) if user_input.isdigit() else None
-        profile["disability_percentage"] = perc
-        next_step = "AWAITING_MINORITY"
-        response_text = "**Step 8:** Do you belong to a **Minority** community? (Yes / No)"
-
-    elif step == "AWAITING_MINORITY":
-        profile["minority"] = user_input.lower() in ['yes', 'y', 'true']
-        next_step = "AWAITING_BPL"
-        response_text = "**Step 9:** Do you possess a **Below Poverty Line (BPL)** card? (Yes / No)"
-
-    elif step == "AWAITING_BPL":
-        profile["below_poverty_line"] = user_input.lower() in ['yes', 'y', 'true']
-        next_step = "AWAITING_DISTRESS"
-        response_text = "**Step 10:** Are you facing **Economic Distress**? (Yes / No)"
-
-    elif step == "AWAITING_DISTRESS":
-        profile["economic_distress"] = user_input.lower() in ['yes', 'y', 'true']
-        next_step = "AWAITING_GOVT_EMP"
-        response_text = "**Step 11:** Are you a **Government Employee**? (Yes / No)"
-
-    elif step == "AWAITING_GOVT_EMP":
-        profile["government_employee"] = user_input.lower() in ['yes', 'y', 'true']
-        next_step = "AWAITING_OCCUPATION"
-        response_text = "**Step 12:** What is your primary **Occupation**? (e.g., Farmer, Student, Artisan, Unemployed)"
-
-    elif step == "AWAITING_OCCUPATION":
-        profile["occupation"] = user_input
-        next_step = "PROFILE_COMPLETE"
-        
-        response_text = (
-            "🎉 **Yojana Mitra Profile Created Successfully!**\n"
-            "The following structure is safely synced to PostgreSQL:\n\n"
-            f"• **Gender:** {profile.get('gender')}\n"
-            f"• **Age:** {profile.get('age')} years\n"
-            f"• **Income:** ₹{profile.get('income', 0):,}\n"
-            f"• **Caste:** {profile.get('caste')}\n"
-            f"• **Residence:** {profile.get('residence')}\n"
-            f"• **Marital Status:** {profile.get('marital_status')}\n"
-            f"• **Differently Abled:** {profile.get('differently_abled')} (Perc: {profile.get('disability_percentage')}%)\n"
-            f"• **Minority:** {profile.get('minority')}\n"
-            f"• **BPL Status:** {profile.get('below_poverty_line')}\n"
-            f"• **Economic Distress:** {profile.get('economic_distress')}\n"
-            f"• **Govt Employee:** {profile.get('government_employee')}\n"
-            f"• **Occupation:** {profile.get('occupation')}\n\n"
-            "You are all set. Type any question now to search matching schemes!"
-        )
-
-    import product_inference.db as db
-    try:
-        db.update_user_state(user_id, next_step, profile)
-    except Exception as e:
-        print(f"[Graph Error] Onboarding database sync failed: {e}")
-
+def request_profile(state: ConversationState) -> dict:
+    """Asks the user to fill out their profile using the platform-specific form."""
     return {
-        "onboarding_step": next_step,
-        "user_profile": profile,
-        "response": response_text
+        "response": (
+            "⚠️ **Profile Required**\n\n"
+            "To apply for a scheme or get personalized recommendations, I need to know a bit about you first.\n\n"
+            "Please run **/profile** to fill out a quick form. It takes less than a minute and lets me personalize everything for you!"
+        )
     }
 
 
@@ -412,6 +302,8 @@ def handle_scheme_query(state: ConversationState) -> dict:
             text=user_query,
             conversation_history=formatted_history
         )
+        if not is_profile_complete(profile):
+            reply_text += "\n\n---\n*💡 These results are general. Run **/profile** to get results filtered exactly to your age, income, and category!*"
     except Exception as e:
         print(f"[Graph Error] Core RAG execution failed: {e}")
         reply_text = "I ran into a problem scanning matching programs. Let me check my directory again."
@@ -469,6 +361,14 @@ def request_next_document(state: ConversationState) -> dict:
     target_scheme = state.get("target_scheme", "")
     intent = state.get("current_intent", "")
     awaiting = state.get("awaiting_document", "")
+    tracked_scheme = state.get("scheme_for_pending_docs", "")
+    
+    if target_scheme and target_scheme != tracked_scheme:
+        # User switched to a different scheme — reset doc state
+        pending = []
+        collected = []
+        skipped = []
+        awaiting = ""
     
     # 0. CLARIFY SCHEME NAME LOGIC: If intent is CLARIFY_SCHEME_NAME, ask Yes/No clarification immediately
     if intent == "CLARIFY_SCHEME_NAME":
@@ -476,6 +376,7 @@ def request_next_document(state: ConversationState) -> dict:
         user_input = state.get("user_input_scheme", "")
         return {
             "target_scheme": fuzzy_target,
+            "scheme_for_pending_docs": fuzzy_target,
             "response": (
                 f"🔍 **Scheme Name Clarification**\n\n"
                 f"You asked to apply for: **{user_input or 'your scheme'}**.\n"
@@ -506,6 +407,7 @@ def request_next_document(state: ConversationState) -> dict:
                 "collected_documents": [],
                 "skipped_documents": [],
                 "awaiting_document": "",
+                "scheme_for_pending_docs": target_scheme,
                 "current_intent": "LAUNCH_AUTOMATION"
             }
 
@@ -559,6 +461,7 @@ def request_next_document(state: ConversationState) -> dict:
                 "collected_documents": collected,
                 "skipped_documents": [], # Reset skipped so user is prompted again
                 "awaiting_document": first_missing,
+                "scheme_for_pending_docs": target_scheme,
                 "vault_snapshot": vault_data,
                 "response": (
                     f"⚠️ **Mandatory Documents Missing for Portal Submission**\n\n"
@@ -574,6 +477,7 @@ def request_next_document(state: ConversationState) -> dict:
             "collected_documents": collected,
             "skipped_documents": skipped,
             "awaiting_document": "",
+            "scheme_for_pending_docs": target_scheme,
             "vault_snapshot": vault_data,
             "current_intent": "LAUNCH_AUTOMATION"
         }
@@ -592,6 +496,7 @@ def request_next_document(state: ConversationState) -> dict:
         "collected_documents": collected,
         "skipped_documents": skipped,
         "awaiting_document": next_doc,
+        "scheme_for_pending_docs": target_scheme,
         "vault_snapshot": vault_data,
         "response": (
             f"📄 **Document Required for {target_scheme or 'application'} {progress}:**\n\n"
@@ -860,12 +765,15 @@ def append_response(state: ConversationState) -> dict:
 # 3. CONDITIONAL EDGE ROUTING ROUTINES
 # ==========================================
 def check_onboarding(state: ConversationState) -> str:
-    if state.get("onboarding_step") != "PROFILE_COMPLETE":
-        return "onboarding_handler"
     return "classify_intent"
 
 def route_intent(state: ConversationState) -> str:
     intent = state.get("current_intent", "CHIT_CHAT")
+    profile = state.get("user_profile", {})
+
+    if intent == "APPLY_SCHEME" and not is_profile_complete(profile):
+        return "request_profile"
+
     if intent == "AUTOMATION_RESPONSE":
         return "handle_automation_response"
     elif intent == "LAUNCH_AUTOMATION":
@@ -895,7 +803,6 @@ builder = StateGraph(ConversationState)
 
 # Node Registrations
 builder.add_node("load_user_profile", load_user_profile)
-builder.add_node("onboarding_handler", onboarding_handler)
 builder.add_node("classify_intent", classify_intent)
 builder.add_node("handle_chit_chat", handle_chit_chat)
 builder.add_node("handle_scheme_query", handle_scheme_query)
@@ -905,18 +812,11 @@ builder.add_node("launch_automation", launch_automation)
 builder.add_node("handle_automation_response", handle_automation_response)
 builder.add_node("append_response", append_response)
 builder.add_node("summarize_conversation", summarize_conversation)
+builder.add_node("request_profile", request_profile)
 
 # Linear and Conditional Wire mapping
 builder.add_edge(START, "load_user_profile")
-
-builder.add_conditional_edges(
-    "load_user_profile", 
-    check_onboarding,
-    {
-        "onboarding_handler": "onboarding_handler",
-        "classify_intent": "classify_intent"
-    }
-)
+builder.add_edge("load_user_profile", "classify_intent")
 
 builder.add_conditional_edges(
     "append_response", 
@@ -928,12 +828,13 @@ builder.add_conditional_edges(
 )
 
 builder.add_edge("summarize_conversation", END)
-builder.add_edge("onboarding_handler", "append_response")
+builder.add_edge("request_profile", "append_response")
 
 builder.add_conditional_edges(
     "classify_intent",
     route_intent,
     {
+        "request_profile": "request_profile",
         "request_next_document": "request_next_document",
         "handle_scheme_query": "handle_scheme_query",
         "handle_profile_update": "handle_profile_update",

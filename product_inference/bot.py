@@ -40,12 +40,13 @@ _active_tasks: dict[str, asyncio.Task] = {}
 
 @bot.event
 async def on_ready():
+    await bot.tree.sync()
     print(f'==========================================')
     print(f' Yojana Mitra Powered by LangGraph Active')
     print(f'==========================================')
 
-async def _do_reset(user_id: str) -> bool:
-    """Shared reset logic: wipes profile, vault, and checkpointer state from DB."""
+def _do_reset(user_id: str):
+    """Shared reset logic (sync): wipes profile, vault, and checkpointer state from DB."""
     import psycopg2
     from product_inference.db import DB_PARAMS
     conn = psycopg2.connect(**DB_PARAMS)
@@ -58,28 +59,230 @@ async def _do_reset(user_id: str) -> bool:
     cur.close()
     conn.close()
 
-@bot.slash_command(name="reset", description="Wipe your profile and start fresh.")
-async def reset_slash(ctx):
-    user_id = f"discord_{ctx.author.id}"
+# ---------------------------------------------------------
+# FORM-BASED PROFILE UI  (all 13 fields across 3 steps)
+# Step 1: Modal popup   — name, age, income, caste, occupation
+# Step 2: ProfileView1  — residence, marital status, disability, minority
+# Step 3: ProfileView2  — gender, bpl, economic distress, govt employee → Save
+# ---------------------------------------------------------
+
+class ProfileView2(discord.ui.View):
+    """Step 3/3: BPL, economic distress, government employee → Save"""
+
+    def __init__(self, user_id: str, profile: dict):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.profile = profile
+
+    @discord.ui.select(
+        placeholder="👤 Gender",
+        options=[
+            discord.SelectOption(label="👨 Male", value="Male"),
+            discord.SelectOption(label="👩 Female", value="Female"),
+            discord.SelectOption(label="🌈 Other", value="Other"),
+        ]
+    )
+    async def sel_gender(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["gender"] = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="🏠 Below Poverty Line (BPL)?",
+        options=[
+            discord.SelectOption(label="✅ Yes — I have a BPL card", value="true"),
+            discord.SelectOption(label="❌ No", value="false"),
+        ]
+    )
+    async def sel_bpl(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["below_poverty_line"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="📉 Facing Economic Distress?",
+        options=[
+            discord.SelectOption(label="✅ Yes", value="true"),
+            discord.SelectOption(label="❌ No", value="false"),
+        ]
+    )
+    async def sel_distress(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["economic_distress"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="🏗 Government Employee?",
+        options=[
+            discord.SelectOption(label="✅ Yes", value="true"),
+            discord.SelectOption(label="❌ No", value="false"),
+        ]
+    )
+    async def sel_govt(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["government_employee"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.button(label="✅ Save Profile", style=discord.ButtonStyle.success, row=3)
+    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db.update_user_state(self.user_id, "PROFILE_COMPLETE", self.profile)
+        for child in self.children:
+            child.disabled = True
+        g = self.profile.get
+        summary = (
+            "🎉 **Profile Saved Successfully!**\n\n"
+            f"• **Name:** {g('name', '—')}\n"
+            f"• **Gender:** {g('gender', '—')}\n"
+            f"• **Age:** {g('age', '—')} yrs\n"
+            f"• **Income:** ₹{int(g('income', 0)):,}\n"
+            f"• **Caste:** {g('caste', '—')}\n"
+            f"• **Occupation:** {g('occupation', '—')}\n"
+            f"• **Residence:** {g('residence', '—')}\n"
+            f"• **Marital Status:** {g('marital_status', '—')}\n"
+            f"• **Differently Abled:** {'Yes' if g('differently_abled') else 'No'}\n"
+            f"• **Minority:** {'Yes' if g('minority') else 'No'}\n"
+            f"• **BPL Card:** {'Yes' if g('below_poverty_line') else 'No'}\n"
+            f"• **Economic Distress:** {'Yes' if g('economic_distress') else 'No'}\n"
+            f"• **Govt Employee:** {'Yes' if g('government_employee') else 'No'}\n\n"
+            "You're all set! Ask me to **find schemes** for you now! 🎯"
+        )
+        await interaction.response.edit_message(content=summary, view=self)
+
+
+class ProfileView1(discord.ui.View):
+    """Step 2/3: Residence, marital status, disability, minority → Next"""
+
+    def __init__(self, user_id: str, profile: dict):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.profile = profile
+
+    @discord.ui.select(
+        placeholder="🏘 Residence Area",
+        options=[
+            discord.SelectOption(label="🌾 Rural", value="Rural"),
+            discord.SelectOption(label="🏙 Urban", value="Urban"),
+        ]
+    )
+    async def sel_residence(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["residence"] = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="💍 Marital Status",
+        options=[
+            discord.SelectOption(label="Single", value="Single"),
+            discord.SelectOption(label="Married", value="Married"),
+            discord.SelectOption(label="Widowed", value="Widowed"),
+            discord.SelectOption(label="Divorced", value="Divorced"),
+        ]
+    )
+    async def sel_marital(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["marital_status"] = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="♿ Differently Abled?",
+        options=[
+            discord.SelectOption(label="✅ Yes", value="true"),
+            discord.SelectOption(label="❌ No", value="false"),
+        ]
+    )
+    async def sel_abled(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["differently_abled"] = (select.values[0] == "true")
+        self.profile["disability_percentage"] = 40 if self.profile["differently_abled"] else 0
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="🕌 Minority Community?",
+        options=[
+            discord.SelectOption(label="✅ Yes", value="true"),
+            discord.SelectOption(label="❌ No", value="false"),
+        ]
+    )
+    async def sel_minority(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["minority"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Next →", style=discord.ButtonStyle.primary, row=4)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        view2 = ProfileView2(self.user_id, self.profile)
+        await interaction.response.edit_message(
+            content="**Step 3/3** — Almost done! Answer these last questions:",
+            view=view2
+        )
+
+
+class ProfileModal(discord.ui.Modal):
+    def __init__(self, user_id: str, **kwargs):
+        super().__init__(title="Yojana Mitra Profile (1/3)", **kwargs)
+        self.user_id = user_id
+        self.add_item(discord.ui.TextInput(label="Full Name", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Age (years, numbers only)", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Annual Family Income in ₹ (numbers only)", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Caste (General / OBC / SC / ST)", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Occupation (e.g. Farmer, Student)", style=discord.TextStyle.short))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        age_str = self.children[1].value.strip()
+        income_str = self.children[2].value.strip().replace(",", "").replace("\u20b9", "")
+
+        if not age_str.isdigit():
+            await interaction.response.send_message("⚠️ Age must be a number (e.g. 25). Please run /profile again.", ephemeral=True)
+            return
+        if not income_str.isdigit():
+            await interaction.response.send_message("⚠️ Income must be a number (e.g. 45000). Please run /profile again.", ephemeral=True)
+            return
+
+        profile = {
+            "name": self.children[0].value.strip(),
+            "age": int(age_str),
+            "income": int(income_str),
+            "caste": self.children[3].value.strip(),
+            "occupation": self.children[4].value.strip(),
+            # Defaults filled in step 2 & 3:
+            "gender": "Unknown",
+            "differently_abled": False, "disability_percentage": 0,
+            "minority": False, "below_poverty_line": False,
+            "economic_distress": False, "government_employee": False,
+            "residence": "Urban", "marital_status": "Single",
+        }
+
+        view1 = ProfileView1(self.user_id, profile)
+        await interaction.response.send_message(
+            "**Step 2/3** — Select your personal details below:",
+            view=view1,
+            ephemeral=True
+        )
+
+@bot.tree.command(name="profile", description="Fill out your Yojana Mitra profile to get personalized schemes.")
+async def profile_slash(interaction: discord.Interaction):
+    user_id = f"discord_{interaction.user.id}"
+    modal = ProfileModal(user_id=user_id)
+    await interaction.response.send_modal(modal)
+# ---------------------------------------------------------
+
+@bot.tree.command(name="reset", description="Wipe your profile and start fresh.")
+async def reset_slash(interaction: discord.Interaction):
+    user_id = f"discord_{interaction.user.id}"
     task = _active_tasks.pop(user_id, None)
     if task and not task.done():
         task.cancel()
     try:
         await asyncio.to_thread(_do_reset, user_id)
-        await ctx.respond("🔄 **Profile Reset Complete.**\n\nAll your data has been wiped. Send me any message to start fresh!", ephemeral=True)
+        await interaction.response.send_message("🔄 **Profile Reset Complete.**\n\nAll your data has been wiped. Send me any message to start fresh!", ephemeral=True)
     except Exception as e:
         print(f"[Reset Error] {e}")
-        await ctx.respond("⚠️ Reset encountered an error. Please try again.", ephemeral=True)
+        await interaction.response.send_message("⚠️ Reset encountered an error. Please try again.", ephemeral=True)
 
-@bot.slash_command(name="stop", description="Stop the currently running task.")
-async def stop_slash(ctx):
-    user_id = f"discord_{ctx.author.id}"
+@bot.tree.command(name="stop", description="Stop the currently running task.")
+async def stop_slash(interaction: discord.Interaction):
+    user_id = f"discord_{interaction.user.id}"
     task = _active_tasks.get(user_id)
     if task and not task.done():
         _active_tasks.pop(user_id, None)
         task.cancel()
-        await ctx.respond("🛑 **Stopped.** Send a new message to continue.", ephemeral=True)
-    # Silently ignore if nothing is running
+        await interaction.response.send_message("🛑 **Stopped.** Send a new message to continue.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Nothing is currently running.", ephemeral=True)
 
 
 @bot.event

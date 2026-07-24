@@ -21,8 +21,8 @@ import requests
 import discord
 from discord.ext import commands
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from dotenv import load_dotenv
 from sarvamai import SarvamAI
@@ -249,8 +249,140 @@ intents = discord.Intents.default()
 intents.message_content = True
 discord_bot = commands.Bot(command_prefix='!', intents=intents)
 
+class ProfileView2(discord.ui.View):
+    def __init__(self, user_id: str, profile: dict):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.profile = profile
+
+    @discord.ui.select(
+        placeholder="👤 Gender",
+        options=[
+            discord.SelectOption(label="👨 Male", value="Male"),
+            discord.SelectOption(label="👩 Female", value="Female"),
+            discord.SelectOption(label="🌈 Other", value="Other"),
+        ]
+    )
+    async def sel_gender(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["gender"] = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="🏠 Below Poverty Line (BPL)?", options=[discord.SelectOption(label="✅ Yes — I have a BPL card", value="true"), discord.SelectOption(label="❌ No", value="false")])
+    async def sel_bpl(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["below_poverty_line"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="📉 Facing Economic Distress?", options=[discord.SelectOption(label="✅ Yes", value="true"), discord.SelectOption(label="❌ No", value="false")])
+    async def sel_distress(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["economic_distress"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="🏗 Government Employee?", options=[discord.SelectOption(label="✅ Yes", value="true"), discord.SelectOption(label="❌ No", value="false")])
+    async def sel_govt(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["government_employee"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.button(label="✅ Save Profile", style=discord.ButtonStyle.success, row=3)
+    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db.update_user_state(self.user_id, "PROFILE_COMPLETE", self.profile)
+        for child in self.children:
+            child.disabled = True
+        g = self.profile.get
+        summary = (
+            "🎉 **Profile Saved Successfully!**\n\n"
+            f"• **Name:** {g('name', '—')}\n• **Gender:** {g('gender', '—')}\n• **Age:** {g('age', '—')} yrs\n"
+            f"• **Income:** ₹{int(g('income', 0)):,}\n• **Caste:** {g('caste', '—')}\n"
+            f"• **Occupation:** {g('occupation', '—')}\n• **Residence:** {g('residence', '—')}\n"
+            f"• **Marital Status:** {g('marital_status', '—')}\n"
+            f"• **Differently Abled:** {'Yes' if g('differently_abled') else 'No'}\n"
+            f"• **Minority:** {'Yes' if g('minority') else 'No'}\n"
+            f"• **BPL Card:** {'Yes' if g('below_poverty_line') else 'No'}\n"
+            f"• **Economic Distress:** {'Yes' if g('economic_distress') else 'No'}\n"
+            f"• **Govt Employee:** {'Yes' if g('government_employee') else 'No'}\n\n"
+            "You're all set! Ask me to **find schemes** for you now! 🎯"
+        )
+        await interaction.response.edit_message(content=summary, view=self)
+
+
+class ProfileView1(discord.ui.View):
+    def __init__(self, user_id: str, profile: dict):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.profile = profile
+
+    @discord.ui.select(placeholder="🏘 Residence Area", options=[discord.SelectOption(label="🌾 Rural", value="Rural"), discord.SelectOption(label="🏙 Urban", value="Urban")])
+    async def sel_residence(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["residence"] = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="💍 Marital Status", options=[discord.SelectOption(label="Single", value="Single"), discord.SelectOption(label="Married", value="Married"), discord.SelectOption(label="Widowed", value="Widowed"), discord.SelectOption(label="Divorced", value="Divorced")])
+    async def sel_marital(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["marital_status"] = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="♿ Differently Abled?", options=[discord.SelectOption(label="✅ Yes", value="true"), discord.SelectOption(label="❌ No", value="false")])
+    async def sel_abled(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["differently_abled"] = (select.values[0] == "true")
+        self.profile["disability_percentage"] = 40 if self.profile["differently_abled"] else 0
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="🕌 Minority Community?", options=[discord.SelectOption(label="✅ Yes", value="true"), discord.SelectOption(label="❌ No", value="false")])
+    async def sel_minority(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.profile["minority"] = (select.values[0] == "true")
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Next →", style=discord.ButtonStyle.primary, row=4)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        view2 = ProfileView2(self.user_id, self.profile)
+        await interaction.response.edit_message(content="**Step 3/3** — Almost done! Answer these last questions:", view=view2)
+
+
+class ProfileModal(discord.ui.Modal):
+    def __init__(self, user_id: str, **kwargs):
+        super().__init__(title="Yojana Mitra Profile (1/3)", **kwargs)
+        self.user_id = user_id
+        self.add_item(discord.ui.TextInput(label="Full Name", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Age (years, numbers only)", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Annual Family Income in ₹ (numbers only)", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Caste (General/OBC/SC/ST)", style=discord.TextStyle.short))
+        self.add_item(discord.ui.TextInput(label="Occupation (e.g. Farmer, Student)", style=discord.TextStyle.short))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        age_str = self.children[1].value.strip()
+        income_str = self.children[2].value.strip().replace(",", "").replace("\u20b9", "")
+
+        if not age_str.isdigit() or not income_str.isdigit():
+            await interaction.response.send_message("⚠️ Age and Income must be numbers. Please run /profile again.", ephemeral=True)
+            return
+
+        profile = {
+            "name": self.children[0].value.strip(),
+            "age": int(age_str),
+            "income": int(income_str),
+            "caste": self.children[3].value.strip(),
+            "occupation": self.children[4].value.strip(),
+            "gender": "Unknown",
+            "differently_abled": False, "disability_percentage": 0,
+            "minority": False, "below_poverty_line": False,
+            "economic_distress": False, "government_employee": False,
+            "residence": "Urban", "marital_status": "Single",
+        }
+        view1 = ProfileView1(self.user_id, profile)
+        await interaction.response.send_message("**Step 2/3** — Select your personal details below:", view=view1, ephemeral=True)
+
+
+@discord_bot.tree.command(name="profile", description="Fill out your Yojana Mitra profile to get personalized schemes.")
+async def profile_slash(interaction: discord.Interaction):
+    user_id = f"discord_{interaction.user.id}"
+    modal = ProfileModal(user_id=user_id)
+    await interaction.response.send_modal(modal)
+
+
 @discord_bot.event
 async def on_ready():
+    await discord_bot.tree.sync()
     print("==========================================")
     print(" Yojana Mitra Discord (Audio Mode) Active")
     print("==========================================")
@@ -327,6 +459,59 @@ async def on_message(message: discord.Message):
 
 
 # ── TELEGRAM BOT ──────────────────────────────────────────────────────────────
+
+_profile_sessions: dict[str, dict] = {}
+
+FORM_FLOW = [
+    ("name",                "1/13", "👤 *Step 1/13* — What is your *full name*?", None),
+    ("gender",              "2/13", "👤 *Step 2/13* — What is your *gender*?", [[("👨 Male", "Male"), ("👩 Female", "Female"), ("🌈 Other", "Other")]]),
+    ("residence",           "3/13", "🏘 *Step 3/13* — Where do you *live*?", [[("🌾 Rural", "Rural"), ("🏙 Urban", "Urban")]]),
+    ("caste",               "4/13", "📋 *Step 4/13* — What is your *caste category*?", [[("General", "General"), ("OBC", "OBC")], [("SC", "SC"), ("ST", "ST")]]),
+    ("marital_status",      "5/13", "💍 *Step 5/13* — What is your *marital status*?", [[("Single", "Single"), ("Married", "Married")], [("Widowed", "Widowed"), ("Divorced", "Divorced")]]),
+    ("occupation",          "6/13", "💼 *Step 6/13* — What is your *occupation*?", [[("🌾 Farmer", "Farmer"), ("📚 Student", "Student")], [("💼 Salaried", "Salaried"), ("🏪 Business Owner", "Business Owner")], [("🧵 Artisan", "Artisan"), ("❌ Unemployed", "Unemployed")], [("✏️ Type your own...", "__text__")]]),
+    ("differently_abled",   "7/13", "♿ *Step 7/13* — Are you *differently abled*?", [[("✅ Yes", "true"), ("❌ No", "false")]]),
+    ("minority",            "8/13", "🕌 *Step 8/13* — Do you belong to a *minority community*?", [[("✅ Yes", "true"), ("❌ No", "false")]]),
+    ("below_poverty_line",  "9/13", "🏠 *Step 9/13* — Do you have a *BPL card* (Below Poverty Line)?", [[("✅ Yes", "true"), ("❌ No", "false")]]),
+    ("economic_distress",   "10/13", "📉 *Step 10/13* — Are you facing *economic distress*?", [[("✅ Yes", "true"), ("❌ No", "false")]]),
+    ("government_employee", "11/13", "🏗 *Step 11/13* — Are you a *government employee*?", [[("✅ Yes", "true"), ("❌ No", "false")]]),
+    ("age",                 "12/13", "🔢 *Step 12/13* — Please *type your age* in years:", None),
+    ("income",              "13/13", "💰 *Step 13/13* — Please type your annual family *income in ₹* (e.g. 45000):", None),
+]
+
+def _build_keyboard(rows: list) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=f"pf|{value}") for label, value in row] for row in rows])
+
+async def _send_form_step(user_id: str, step_idx: int, reply_fn):
+    if step_idx >= len(FORM_FLOW):
+        session = _profile_sessions.pop(user_id, {})
+        data = session.get("data", {})
+        try: db.update_user_state(user_id, "PROFILE_COMPLETE", data)
+        except Exception as e: print(f"[Profile Save Error] {e}")
+        g = data.get
+        summary = (
+            "🎉 *Profile Saved Successfully!*\n\n"
+            f"• *Name:* {g('name', '—')}\n• *Gender:* {g('gender', '—')}\n• *Age:* {g('age', '—')} yrs\n"
+            f"• *Income:* ₹{int(g('income', 0)):,}\n• *Caste:* {g('caste', '—')}\n"
+            f"• *Occupation:* {g('occupation', '—')}\n• *Residence:* {g('residence', '—')}\n"
+            f"• *Marital Status:* {g('marital_status', '—')}\n"
+            f"• *Differently Abled:* {'Yes' if g('differently_abled') else 'No'}\n"
+            f"• *Minority:* {'Yes' if g('minority') else 'No'}\n"
+            f"• *BPL Card:* {'Yes' if g('below_poverty_line') else 'No'}\n"
+            f"• *Economic Distress:* {'Yes' if g('economic_distress') else 'No'}\n"
+            f"• *Govt Employee:* {'Yes' if g('government_employee') else 'No'}\n\n"
+            "You're all set! Ask me to *find schemes* for you now! 🎯"
+        )
+        await reply_fn(summary, parse_mode="Markdown")
+        return
+
+    field, _label, question, keyboard_rows = FORM_FLOW[step_idx]
+    _profile_sessions[user_id]["current_step"] = step_idx
+    if keyboard_rows:
+        await reply_fn(question, reply_markup=_build_keyboard(keyboard_rows), parse_mode="Markdown")
+    else:
+        _profile_sessions[user_id]["awaiting_text"] = field
+        await reply_fn(question, parse_mode="Markdown")
+
 async def tg_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = f"telegram_{update.effective_user.id}"
     text_input = update.message.text or ""
@@ -361,6 +546,36 @@ async def tg_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Stopped. Send a new message to continue.")
         return
 
+    if user_id in _profile_sessions:
+        session = _profile_sessions[user_id]
+        awaiting = session.get("awaiting_text")
+        if awaiting:
+            val = text_input.strip()
+            if awaiting == "age":
+                val = val.replace(" ", "")
+                if not val.isdigit():
+                    await update.message.reply_text("❌ Please enter a valid number for age:")
+                    return
+                session["data"]["age"] = int(val)
+            elif awaiting == "income":
+                val = val.replace(",", "").replace("₹", "").replace(" ", "")
+                if not val.isdigit():
+                    await update.message.reply_text("❌ Please enter a valid number for income:")
+                    return
+                session["data"]["income"] = int(val)
+            elif awaiting == "occupation":
+                session["data"]["occupation"] = val.title()
+            elif awaiting == "name":
+                session["data"]["name"] = val.title()
+            else:
+                session["data"][awaiting] = val
+            session["awaiting_text"] = None
+            await _send_form_step(user_id, session["current_step"] + 1, update.message.reply_text)
+            return
+        else:
+            await update.message.reply_text("📋 Profile form in progress! Please use the buttons.")
+            return
+
     old = _telegram_tasks.pop(user_id, None)
     if old and not old.done():
         old.cancel()
@@ -390,6 +605,48 @@ async def tg_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[Reset Error] {e}")
         await update.message.reply_text("Reset encountered an error. Please try again.")
 
+async def tg_profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = f"telegram_{update.effective_user.id}"
+    _profile_sessions[user_id] = {
+        "current_step": 0, "awaiting_text": None,
+        "data": {"differently_abled": False, "disability_percentage": 0, "minority": False,
+                 "below_poverty_line": False, "economic_distress": False, "government_employee": False}
+    }
+    await update.message.reply_text("📋 Setting up your Yojana Mitra Profile\n\nPlease answer the questions below by tapping the buttons.")
+    await _send_form_step(user_id, 0, update.message.reply_text)
+
+async def tg_profile_form_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = f"telegram_{query.from_user.id}"
+    data = query.data
+    if not data.startswith("pf|"): return
+    val = data[3:]
+    if user_id not in _profile_sessions:
+        await query.edit_message_text("⚠️ Your profile session expired. Please run /profile again.")
+        return
+    session = _profile_sessions[user_id]
+    step_idx = session.get("current_step", 0)
+    field, _label, question, _kb = FORM_FLOW[step_idx]
+
+    if val == "__text__":
+        session["awaiting_text"] = field
+        await query.edit_message_text("✏️ Please *type your occupation* and send it as a message:", parse_mode="Markdown")
+        return
+
+    if val in ("true", "false"):
+        session["data"][field] = (val == "true")
+        if field == "differently_abled":
+            session["data"]["disability_percentage"] = 40 if session["data"][field] else 0
+        disp = "Yes" if val == "true" else "No"
+    else:
+        session["data"][field] = val
+        disp = val
+
+    clean_q = question.replace("*", "").replace("\\", "")
+    await query.edit_message_text(f"✅ {clean_q}\n*Selected:* {disp}", parse_mode="Markdown")
+    await _send_form_step(user_id, step_idx + 1, query.message.reply_text)
+
 
 async def tg_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = f"telegram_{update.effective_user.id}"
@@ -405,6 +662,8 @@ async def run_telegram():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("reset", tg_reset_command))
     app.add_handler(CommandHandler("stop",  tg_stop_command))
+    app.add_handler(CommandHandler("profile", tg_profile_command))
+    app.add_handler(CallbackQueryHandler(tg_profile_form_callback, pattern=r"^pf\|"))
     app.add_handler(MessageHandler(
         filters.TEXT | filters.VOICE | filters.AUDIO | filters.PHOTO | filters.Document.ALL,
         tg_handle_message

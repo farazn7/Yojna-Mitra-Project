@@ -209,8 +209,8 @@
         const tg  = data.telegram; // 'up', 'down', 'new', 'grace', 'paused', 'unknown'
         const dc  = data.discord;
 
-        const tgUp = tg === 'up' || tg === 'grace';
-        const dcUp = dc === 'up' || dc === 'grace';
+        const tgUp = tg === 'up';
+        const dcUp = dc === 'up';
 
         if (tgUp && dcUp) {
           badge.classList.remove('offline');
