@@ -22,15 +22,14 @@ export default async function handler(req, res) {
 
     const { checks } = await response.json();
 
-    // Match each check by the UUID embedded in its ping_url
+    // Read-only API keys obscure the ping_url for security, so we match by check name
     let telegramStatus = 'unknown';
     let discordStatus  = 'unknown';
 
     for (const check of checks) {
-      const url = check.ping_url || '';
-      if (url.includes(TELEGRAM_UUID)) {
+      if (check.name === 'Telegram Bot') {
         telegramStatus = check.status; // 'up', 'down', 'new', 'grace', 'paused'
-      } else if (url.includes(DISCORD_UUID)) {
+      } else if (check.name === 'Discord Bot') {
         discordStatus = check.status;
       }
     }
