@@ -6,7 +6,7 @@ Yojana Mitra is an autonomous, multi-user AI agent deployed on **Telegram** and 
 
 The system handles natural language in Hindi, English, and Hinglish. It is built specifically for users who face language, literacy, and technical barriers when interacting with government portals.
 
-**Live Demo:** [yojanamitra.vercel.app](https://yojna-mitra.vercel.app) &nbsp;|&nbsp;
+**Live Demo:** [yojanamitra.vercel.app](https://yojna-mitra-project.vercel.app) &nbsp;|&nbsp;
 **Telegram:** [@yojnamitra_bot](https://t.me/yojnamitra_bot) &nbsp;|&nbsp;
 **Discord:** [Add to Server](https://discord.com/oauth2/authorize?client_id=1518138316510199808)
 
