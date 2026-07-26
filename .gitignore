@@ -28,3 +28,12 @@ temp_documents/
 browser_profiles/
 screenshots/
 *_final_review.png
+
+# Local Claude Code config/docs (kept local only, not pushed to remote)
+.claude/
+.claudeignore
+CLAUDE.md
+docs/
+
+# Voice bot scratch audio/transcripts
+temp_voice/
