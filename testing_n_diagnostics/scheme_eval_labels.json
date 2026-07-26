@@ -1,0 +1,143 @@
+{
+  "_meta": {
+    "description": "Ground-truth expected_scheme_names for run_yojana_pipeline() (core_inference/hybrid_rag.py), derived from data_extraction/schemes.json eligibility text AND verified directly against the live government_schemes table's min_age/max_age/max_income/is_women_only/is_differently_abled columns (not just topical text matching).",
+    "verified_against": "live Postgres government_schemes table, 2026-07-26",
+    "known_issues_surfaced": [
+      "p3: both textually-plausible Folk Artist schemes are excluded by the SQL hard filter given current DB column values ('Pension Scheme - Folk Artist' has min_age=60, which doesn't encode the eligibility text's under-60-disabled exception; 'Scheme of Extending Financial Assistance to Folk Artists...' has max_income=2000, which looks like a mis-extracted grant amount rather than an income cap).",
+      "p10: 'Indira Gandhi National Old Age Pension Scheme -Tamil Nadu' has is_women_only=True in the DB despite gender-neutral eligibility text -- likely an LLM-extraction error, possibly confused with the sibling Widow Pension scheme during ingestion -- and is therefore excluded for this Male persona.",
+      "p5: 'Unemployed Youth Employment Generation Programme' exists as 2 duplicate rows in government_schemes with identical column values -- both pass the SQL filter independently and may both surface in schemes_fetched, consuming two of the top_k slots with the same name.",
+      "hn4: the same scheme's DB max_age=35 is a flat bound that doesn't encode the eligibility text's stated 45-year age relaxation for special categories (SC/ST/MBC/BC/Minorities/Ex-Servicemen/Differently abled/Transgender) -- same category-exception-not-encoded issue as p3."
+    ]
+  },
+  "positive_cases": [
+    {
+      "persona_id": "p1_widowed_farmer",
+      "expected_scheme_names": [
+        "Indira Gandhi National Widow Pension Scheme - Tamil Nadu",
+        "Destitute Widow Pension Scheme"
+      ],
+      "confidence": "high",
+      "near_miss_blocklist": [],
+      "note": "Verified live: 'Indira Gandhi National Widow Pension Scheme - Tamil Nadu' (min_age=40, is_women_only=True) passes for age 55, Female. 'Destitute Widow Pension Scheme' (min_age=18, max_income=100000, is_women_only=True) passes for income 45000."
+    },
+    {
+      "persona_id": "p2_rural_student",
+      "expected_scheme_names": [],
+      "confidence": "no_match",
+      "near_miss_blocklist": [],
+      "note": "All scholarship schemes in the corpus that fit this need are BC/MBC/DNC-caste-restricted; persona caste=General. Caste is not a SQL-filterable field in run_yojana_pipeline's WHERE clause, so those restricted schemes are NOT excluded at the SQL layer and MAY legitimately surface via vector similarity -- their presence alone is not a bug given the filter's current scope, so no scheme is blocklisted here. Observation-only case: log retrieved schemes for manual review, no hard assertion beyond the empty blocklist check."
+    },
+    {
+      "persona_id": "p3_differently_abled_artist",
+      "expected_scheme_names": [],
+      "confidence": "no_match_sql_filtered",
+      "near_miss_blocklist": [
+        "Pension Scheme - Folk Artist",
+        "Scheme of Extending Financial Assistance to Folk Artists, Troupes for the Purchase of Musical Instruments, Costumes"
+      ],
+      "note": "Both textually-relevant schemes verified EXCLUDED by the live SQL filter for this persona's real profile (age=32, income=140000, differently_abled=True): 'Pension Scheme - Folk Artist' requires min_age=60 (the text's under-60-disabled exception isn't encoded in the DB column); the instruments scheme requires max_income=2000. Blocklisted because their exclusion is a hard SQL-layer guarantee -- if either ever appears in schemes_fetched, that's a real regression in the WHERE clause, not a retrieval-quality nuance."
+    },
+    {
+      "persona_id": "p4_minority_female_student",
+      "expected_scheme_names": [
+        "Moovalur Ramamirtham Ammaiyar Higher Education Assurance Scheme"
+      ],
+      "confidence": "high",
+      "near_miss_blocklist": [],
+      "note": "Verified live: is_women_only=True, no age/income bound; passes for age 21, Female (all girl students who studied Classes 6-12 in Tamil Nadu government schools, pursuing higher education)."
+    },
+    {
+      "persona_id": "p5_transgender_skills",
+      "expected_scheme_names": [
+        "Unemployed Youth Employment Generation Programme"
+      ],
+      "confidence": "high",
+      "near_miss_blocklist": [],
+      "note": "Verified live: min_age=18, max_age=35, max_income=500000; passes for age 26, income null->0. KNOWN DUPLICATE: exists as 2 identical rows in government_schemes -- both independently pass the filter and may both appear in schemes_fetched. The test logs this duplication as a diagnostic, it does not fail on it."
+    },
+    {
+      "persona_id": "p6_fisherman_distress",
+      "expected_scheme_names": [],
+      "confidence": "no_match",
+      "near_miss_blocklist": [],
+      "note": "No fishing-ban/lean-period cash relief scheme exists in the corpus. 'Primary Cooperative Agriculture and Rural Development Bank: For Inland Fishing' (max_income=330000) DOES pass this persona's filter (income=80000) and may surface via 'fishing' keyword similarity -- it's a boat/inland-fishing loan product, not lean-period relief, but it's a legitimate SQL survivor so it is NOT blocklisted (asserting its absence would be a false expectation). Observation-only case."
+    },
+    {
+      "persona_id": "p7_govt_employee_health",
+      "expected_scheme_names": [],
+      "confidence": "no_match",
+      "near_miss_blocklist": [
+        "Chief Minister’s Comprehensive Health Insurance Scheme - Tamil Nadu",
+        "Chief Minister's Comprehensive Health Insurance Scheme"
+      ],
+      "note": "Both near-duplicate name variants of the health insurance scheme require max_income=120000; persona income=650000 disqualifies both. Verified live: both EXCLUDED by the SQL filter. Blocklisted because their absence is a hard SQL-layer guarantee, not a fuzzy judgment call. Both spelling variants (curly vs straight apostrophe) are included since scheme_name matching is exact-string based."
+    },
+    {
+      "persona_id": "p8_young_mother_rural",
+      "expected_scheme_names": [
+        "District Central Cooperative Banks and through its Branches: For Maternity Loan through Self Help Groups"
+      ],
+      "confidence": "weak",
+      "near_miss_blocklist": [],
+      "note": "Only a modest Rs.2000 SHG maternity loan matches (is_women_only=True; max_income trivially passes since income is null->0); it is not a nutrition/cash-grant scheme. Counted as a normal hit if retrieved, but flagged 'weak' in the summary report so a human reviewer knows this is the best-available-but-imperfect match, not a strong signal of retrieval quality."
+    },
+    {
+      "persona_id": "p9_minority_business_owner",
+      "expected_scheme_names": [],
+      "confidence": "no_match",
+      "near_miss_blocklist": [],
+      "note": "No minority-corporation collateral-free business loan scheme exists in the corpus. 'Unemployed Youth Employment Generation Programme' DOES pass this persona's filter (age 35 <= max_age 35, income 220000 <= max_income 500000) and is topically adjacent -- but it's a legitimate SQL survivor (demographically eligible, just not minority-corp-branded), so it is NOT blocklisted. Observation-only case."
+    },
+    {
+      "persona_id": "p10_senior_citizen_bpl",
+      "expected_scheme_names": [
+        "Calipers and Crutches - Tamil Nadu"
+      ],
+      "confidence": "high",
+      "near_miss_blocklist": [],
+      "note": "Verified live: is_differently_abled=True required, no age/income/gender bound; passes for differently_abled=True. CORRECTION vs. naive eligibility-text reading: 'Indira Gandhi National Old Age Pension Scheme -Tamil Nadu' textually fits (destitute, 60+, BPL) but its DB row has is_women_only=True (an apparent extraction error, since its eligibility text is gender-neutral) -- verified EXCLUDED for this Male persona. Deliberately NOT included in expected_scheme_names since it cannot appear given current DB state; not blocklisted either, since its exclusion is a data-quality bug rather than correct behavior worth asserting on. Flagged in _meta.known_issues_surfaced instead."
+    }
+  ],
+  "hard_negatives": [
+    {
+      "id": "hn1_widow_below_min_age",
+      "base_persona_id": "p1_widowed_farmer",
+      "profile_overrides": { "age": 35 },
+      "excluded_scheme_name": "Indira Gandhi National Widow Pension Scheme - Tamil Nadu",
+      "boundary_field": "min_age",
+      "note": "Scheme requires min_age=40 (verified live); age 35 is below threshold. Verified via direct SQL query: excluded."
+    },
+    {
+      "id": "hn2_widow_income_over_cap",
+      "base_persona_id": "p1_widowed_farmer",
+      "profile_overrides": { "income": 150000 },
+      "excluded_scheme_name": "Destitute Widow Pension Scheme",
+      "boundary_field": "max_income",
+      "note": "Scheme requires max_income=100000 (verified live); income 150000 exceeds it. Age unchanged (55) still satisfies min_age=18, isolating the income boundary."
+    },
+    {
+      "id": "hn3_higher_ed_gender_flip",
+      "base_persona_id": "p4_minority_female_student",
+      "profile_overrides": { "gender": "Male" },
+      "excluded_scheme_name": "Moovalur Ramamirtham Ammaiyar Higher Education Assurance Scheme",
+      "boundary_field": "is_women_only",
+      "note": "Scheme is_women_only=True; verified live that flipping gender to Male excludes it."
+    },
+    {
+      "id": "hn4_unemployed_youth_over_max_age",
+      "base_persona_id": "p5_transgender_skills",
+      "profile_overrides": { "age": 40 },
+      "excluded_scheme_name": "Unemployed Youth Employment Generation Programme",
+      "boundary_field": "max_age",
+      "note": "DB max_age=35 flat (does not encode the eligibility text's higher 45-yr bound for special categories incl. Transgender -- same category-exception-not-encoded issue as p3/p10). Age 40 exceeds the stored bound. Verified live: excluded."
+    },
+    {
+      "id": "hn5_calipers_disability_flip",
+      "base_persona_id": "p10_senior_citizen_bpl",
+      "profile_overrides": { "differently_abled": false },
+      "excluded_scheme_name": "Calipers and Crutches - Tamil Nadu",
+      "boundary_field": "is_differently_abled",
+      "note": "Scheme is_differently_abled=True; verified live that flipping the persona's flag to False excludes it."
+    }
+  ]
+}
