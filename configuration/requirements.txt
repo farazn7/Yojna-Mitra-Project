@@ -5,7 +5,8 @@ playwright>=1.48.0
 pytest==8.1.1
 
 # --- Phase 3: Database & Vector Storage ---
-psycopg[binary,pool]>=3.1.18 
+psycopg[binary,pool]>=3.1.18   # used by langgraph's PostgresSaver checkpointer (psycopg_pool.ConnectionPool)
+psycopg2-binary>=2.9.9         # used directly by product_inference/db.py and RAG eval scripts
 pgvector==0.2.5
 
 # --- Phase 4: LangGraph State Machine ---
