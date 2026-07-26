@@ -139,6 +139,18 @@ Extended the system from Discord-only to a fully dual-platform deployment.
 
 ---
 
+### Phase 11 — Ground-Truth Retrieval Evaluation
+The original persona sweep (`test_hybrid_rag.py`) only asserted the pipeline returned non-empty text — a flat LLM refusal on a real welfare query still passed. Added a ground-truth eval that asserts against `schemes_fetched`, the pipeline's real pre-LLM retrieval output, instead of the LLM's prose.
+
+- **Labeled Dataset (`scheme_eval_labels.json`):** 10 positive cases + 5 hard-negative boundary cases, every expected match verified against the live `government_schemes` table (not the scraped JSON), plus a `near_miss_blocklist` for personas with no genuine corpus match — avoiding an unfalsifiable `== []` assertion.
+- **Hard-Negative Coverage:** 5 cases, one per SQL-filterable field (`min_age`, `max_age`, `max_income`, `is_women_only`, `is_differently_abled`), each mutating a real persona just past a real scheme's boundary value to test the hard-filter's exclusion behavior.
+- **Three Live Data Bugs Found:** Verified the pipeline's actual SQL filter against production data and surfaced a mis-scoped age boundary, a gender-neutral scheme mislabeled women-only, and a duplicate ingestion row — documented in `scheme_eval_labels.json`'s `known_issues_surfaced`, not silently worked around.
+- **Result:** 24/25 assertions passed; the one failure (`p10_senior_citizen_bpl` at `top_k=3`) is a genuine retrieval-ranking signal — the correct scheme ranks 9th and only surfaces at `top_k=10`.
+
+See `testing_n_diagnostics/README.md` for full methodology and results.
+
+---
+
 ## Repository Structure
 
 ```text
@@ -182,9 +194,11 @@ Yojna-Mitra-Project/
 │   └── schemes.json                # Raw scraped scheme data (230+ schemes)
 │
 ├── testing_n_diagnostics/
-│   ├── test_hybrid_rag.py          # Parametrized persona evaluation suite (10 personas)
+│   ├── test_scheme_recommendation_matching.py   # Ground-truth retrieval eval — asserts on schemes_fetched
+│   ├── scheme_eval_labels.json     # Labeled dataset — 10 positive cases + 5 hard negatives
+│   ├── test_hybrid_rag.py          # Qualitative persona sweep (10 personas) — LLM tone/quality, not correctness
 │   ├── test_phase7_flow.py         # Phase 7 HITL flow tests
-│   ├── rag_evaluation_log.md       # Evaluation results log
+│   ├── README.md                   # Eval methodology, results, and known issues surfaced
 │   └── personas/                   # Citizen persona JSON definitions
 │
 ├── configuration/
@@ -264,9 +278,13 @@ python -m product_inference.bot_telegram  # Telegram
 python -m product_inference.bot_audio
 ```
 
-### 7. Run the Persona Evaluation Suite
+### 7. Run the Evaluation Suites
 
 ```bash
+# Ground-truth retrieval eval — asserts on schemes_fetched against a verified label set
+pytest testing_n_diagnostics/test_scheme_recommendation_matching.py -v -s
+
+# Qualitative persona sweep — LLM tone/quality, logged for human review
 pytest testing_n_diagnostics/test_hybrid_rag.py -v -s
 ```
 
