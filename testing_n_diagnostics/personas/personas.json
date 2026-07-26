@@ -13,7 +13,7 @@
     "below_poverty_line": true,
     "economic_distress": true,
     "government_employee": false,
-    "student": false
+    "occupation": "Farmer"
   },
   {
     "id": "p2_rural_student",
@@ -29,7 +29,7 @@
     "below_poverty_line": true,
     "economic_distress": true,
     "government_employee": false,
-    "student": true
+    "occupation": "Student"
   },
   {
     "id": "p3_differently_abled_artist",
@@ -45,7 +45,7 @@
     "below_poverty_line": false,
     "economic_distress": false,
     "government_employee": false,
-    "student": false
+    "occupation": "Folk Artist"
   },
   {
     "id": "p4_minority_female_student",
@@ -61,7 +61,7 @@
     "below_poverty_line": false,
     "economic_distress": false,
     "government_employee": false,
-    "student": true
+    "occupation": "Student"
   },
   {
     "id": "p5_transgender_skills",
@@ -77,7 +77,7 @@
     "below_poverty_line": true,
     "economic_distress": true,
     "government_employee": false,
-    "student": false
+    "occupation": "Unemployed"
   },
   {
     "id": "p6_fisherman_distress",
@@ -93,7 +93,7 @@
     "below_poverty_line": false,
     "economic_distress": true,
     "government_employee": false,
-    "student": false
+    "occupation": "Fisherman"
   },
   {
     "id": "p7_govt_employee_health",
@@ -109,7 +109,7 @@
     "below_poverty_line": false,
     "economic_distress": false,
     "government_employee": true,
-    "student": false
+    "occupation": "Government School Teacher"
   },
   {
     "id": "p8_young_mother_rural",
@@ -125,7 +125,7 @@
     "below_poverty_line": true,
     "economic_distress": false,
     "government_employee": false,
-    "student": false
+    "occupation": "Homemaker"
   },
   {
     "id": "p9_minority_business_owner",
@@ -141,7 +141,7 @@
     "below_poverty_line": false,
     "economic_distress": false,
     "government_employee": false,
-    "student": false
+    "occupation": "Business Owner"
   },
   {
     "id": "p10_senior_citizen_bpl",
@@ -157,6 +157,6 @@
     "below_poverty_line": true,
     "economic_distress": true,
     "government_employee": false,
-    "student": false
+    "occupation": "Retired"
   }
 ]
