@@ -146,10 +146,14 @@ def plan_node(state: AutomationState) -> AutomationState:
     elif planner_status == "actions_ready":
         actions = plan_result.get("actions", [])
         print(f"  [Actions Generated] -> {len(actions)} execution steps ready.")
+        # Note: retries is intentionally NOT reset here. check_status_node already resets it
+        # to 0 when the page signature genuinely changes (real progress). Resetting it here too
+        # would wipe out check_status_node's counter every cycle the planner keeps proposing
+        # plausible actions against a stuck page, making retry_or_abort_node's abort-after-3
+        # safety net unreachable — confirmed live: an unresponsive page looped indefinitely.
         return {
             "status": "executing",
-            "actions_to_execute": actions,
-            "retries": 0
+            "actions_to_execute": actions
         }
     elif planner_status == "perceiving":
         # No actions available; might be on a static review page or need check
@@ -172,9 +176,9 @@ def execute_node(state: AutomationState) -> AutomationState:
     """
     session_id = state["session_id"]
     actions = state.get("actions_to_execute", [])
-    active_page = get_active_page(session_id)
+    active_page = run_pw(get_active_page, session_id)
 
-    if not active_page or active_page.is_closed():
+    if not active_page or run_pw(active_page.is_closed):
         return {"status": "error", "last_error": "Browser page closed unexpectedly during execution."}
 
     print(f"[Graph: execute_node] Session: {session_id} | Executing {len(actions)} actions...")
@@ -182,22 +186,17 @@ def execute_node(state: AutomationState) -> AutomationState:
     for i, action in enumerate(actions):
         el_id = action["element_id"]
         act_type = action["action"]
-        val = action.get("value", "")
+        val = action.get("value") or ""
         reason = action.get("reasoning", "")
 
         print(f"  -> [ID #{el_id}] {act_type.upper()} | Value: '{val}' | ({reason})")
 
         # Locate element via data-ym-id injected by perception
-        el_id = action.get("element_id")
-        act_type = action.get("action_type")
-        val = action.get("value")
-        locator = perception["locator_map"].get(el_id)
-
-        if not locator:
+        locator = run_pw(active_page.locator, f'[data-ym-id="{el_id}"]')
+        if run_pw(locator.count) == 0:
             print(f"  [Skip Action] Element ID #{el_id} not found in current perception map.")
             continue
 
-        print(f"  -> Executing: [{act_type.upper()}] on ID #{el_id} with value: '{val}'")
         try:
             pre_count = run_pw(active_page.locator("input, select, textarea").count)
 
@@ -335,7 +334,7 @@ def hitl_intercept_node(state: AutomationState) -> AutomationState:
                 active_page = run_pw(get_active_page, session_id)
                 if active_page and not run_pw(active_page.is_closed):
                     try:
-                        loc = perception.get("locator_map", {}).get(unresolved_fields[0].get("id"))
+                        loc = run_pw(active_page.locator, f'[data-ym-id="{unresolved_fields[0].get("id")}"]')
                         if loc:
                             run_pw(loc.first.fill, str(hitl_input))
                             run_pw(active_page.locator("button:has-text('Verify'), input[type='submit'], button:has-text('Submit')").first.click, timeout=8000)
