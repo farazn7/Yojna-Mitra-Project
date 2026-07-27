@@ -1,6 +1,8 @@
-# Evals — Testing & Diagnostics
+# Eval — Scheme Recommendation Matching
 
-This directory holds the evaluation suites for Yojana Mitra's core agent capabilities. The centerpiece here is **`test_scheme_recommendation_matching.py`**, a ground-truth retrieval eval for the Hybrid RAG scheme-matching pipeline (`core_inference/hybrid_rag.py`), plus its labeled dataset **`scheme_eval_labels.json`**.
+A ground-truth retrieval eval for the Hybrid RAG scheme-matching pipeline (`core_inference/hybrid_rag.py`) — **`test_scheme_recommendation_matching.py`** plus its labeled dataset **`scheme_eval_labels.json`**.
+
+> One of two eval suites in this directory. The other is [`eval_web_automation.md`](eval_web_automation.md), which covers the Playwright form-filling agent.
 
 ---
 

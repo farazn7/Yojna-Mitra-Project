@@ -1,6 +1,18 @@
 import re
 import os
 import json
+import sys
+
+# Portal text is routinely not Latin script (a scheme portal may render entirely in Devanagari or
+# Tamil), and this module prints element labels and the model's own reasoning. A Windows console
+# defaults to cp1252, where printing such a string raises UnicodeEncodeError and takes the whole run
+# down — reproduced live on a button labelled "जमा करें". Logging must never be able to do that.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import ollama
 from typing import Annotated, TypedDict
 from langgraph.graph import StateGraph, START, END
@@ -63,6 +75,11 @@ class ConversationState(TypedDict):
     automation_session_id: str               # Browser session ID
     application_mode: str                    # "online" | "pdf_form" | "physical_only" | "unknown"
     application_form_url: str                # Direct URL to form or PDF download
+    document_vault: dict                     # doc_type -> verified file path, forwarded to AutomationState for FILE_UPLOAD classification
+    automation_unresolved_fields: list       # Unresolved field metadata carried from a paused turn into the next resume turn
+    automation_ask_counts: dict              # field identity -> times the portal has re-asked it after the citizen answered (loop bound)
+    automation_page_memory: dict             # screens visited + navigation controls observed to move backwards; survives HITL resumes
+    automation_hitl_answers: dict            # every answer the citizen has given this automation run, accumulated
 
 # ==========================================
 # 2. GRAPH NODES (WORKERS)
@@ -109,16 +126,21 @@ def classify_intent(state: ConversationState) -> dict:
     """Evaluates incoming queries to dynamically route fully onboarded users."""
     if not state["messages"]:
         return {"current_intent": "CHIT_CHAT"}
-        
+
     latest_query = state["messages"][-1].content.strip()
 
     # Fast-track check for synthetic document reception signal from bot.py
     if latest_query.startswith("[DOC_RECEIVED:"):
         return {"current_intent": "DOC_RECEIVED"}
 
-    # Fast-track check if automation is actively running or paused waiting for HITL/Confirmation
-    if state.get("automation_status") in ("hitl_paused", "awaiting_confirm", "running"):
-        return {"current_intent": "AUTOMATION_RESPONSE"}
+    # Automation being paused/running must not short-circuit classification outright —
+    # doing so meant ANY message (e.g. "actually apply for a different scheme instead", "cancel")
+    # was blindly forced into AUTOMATION_RESPONSE with zero real intent check. Real classification
+    # still runs below; automation_was_active + the AUTOMATION_RESPONSE category (added to the
+    # prompt) let the model decide whether this message is answering the pending automation
+    # question or asking for something else. If the citizen overrides, the stale automation
+    # session is cleaned up below rather than left dangling.
+    automation_was_active = state.get("automation_status") in ("hitl_paused", "awaiting_confirm", "running")
 
     # Fast-track check if answering YES to scheme clarification
     if state.get("current_intent") == "CLARIFY_SCHEME_NAME" and latest_query.lower() in ["yes", "y", "yeah", "sure", "ok", "proceed", "start"]:
@@ -128,19 +150,39 @@ def classify_intent(state: ConversationState) -> dict:
     last_schemes = state.get("last_discussed_schemes", [])
     awaiting_doc = state.get("awaiting_document", "none")
     current_target = state.get("target_scheme", "none")
-    
+
     context_str = (
         f"Recently Discussed Schemes: {last_schemes}\n"
         f"Currently Selected Scheme: {current_target}\n"
         f"Currently Awaiting Document Upload: {awaiting_doc}\n"
     )
+    if automation_was_active:
+        context_str += (
+            f"Automation Status: {state.get('automation_status')}\n"
+            f"Pending Automation Question (my last message to the citizen): {state.get('response', '')}\n"
+        )
+
+    intent_enum = "SCHEME_QUERY | APPLY_SCHEME | PROFILE_UPDATE | SKIP_DOCUMENT | CHIT_CHAT"
+    valid_intents = ["SCHEME_QUERY", "APPLY_SCHEME", "PROFILE_UPDATE", "SKIP_DOCUMENT", "CHIT_CHAT", "DOC_RECEIVED"]
+    automation_intent_def = ""
+    if automation_was_active:
+        intent_enum = "SCHEME_QUERY | APPLY_SCHEME | PROFILE_UPDATE | SKIP_DOCUMENT | CHIT_CHAT | AUTOMATION_RESPONSE"
+        valid_intents = valid_intents + ["AUTOMATION_RESPONSE"]
+        automation_intent_def = (
+            "- AUTOMATION_RESPONSE: ONLY valid because Automation Status above shows automation is active. "
+            "Use this when the user's message is directly answering the Pending Automation Question above "
+            "(a verification code, \"CONFIRM\", a requested value like a state/district name) rather than "
+            "asking for something new. If the user clearly wants something else instead (a different scheme, "
+            "to cancel, an unrelated question), classify their actual intent instead — do NOT default to "
+            "AUTOMATION_RESPONSE just because automation happens to be active.\n"
+        )
 
     system_prompt = (
         "You are the intent router for Yojana Mitra, an AI assistant for Indian government welfare schemes.\n"
         f"Context:\n{context_str}\n"
         "Given the user's message and the context above, output ONLY a valid JSON object with two keys:\n"
         "{\n"
-        "  \"intent\": \"<one of: SCHEME_QUERY | APPLY_SCHEME | PROFILE_UPDATE | SKIP_DOCUMENT | CHIT_CHAT>\",\n"
+        f"  \"intent\": \"<one of: {intent_enum}>\",\n"
         "  \"target_scheme\": \"<exact scheme name if intent is APPLY_SCHEME, else null>\"\n"
         "}\n\n"
         "Intent definitions:\n"
@@ -148,13 +190,18 @@ def classify_intent(state: ConversationState) -> dict:
         "- APPLY_SCHEME: User wants to apply for or register for a specific scheme. (e.g. 'I want to apply', 'apply for book bank').\n"
         "- PROFILE_UPDATE: User wants to change their profile details (age, income, caste, etc.) or reset.\n"
         "- SKIP_DOCUMENT: User wants to skip the current document upload (e.g., 'skip', 'next', 'I don't have it'). ONLY select this if Currently Awaiting Document Upload is not 'none'.\n"
-        "- CHIT_CHAT: Greetings, thanks, general conversation.\n\n"
+        "- CHIT_CHAT: Greetings, thanks, general conversation.\n"
+        f"{automation_intent_def}\n"
         "IMPORTANT for APPLY_SCHEME:\n"
         "- If the user mentions a scheme by name (even abbreviated), set target_scheme to your best match from the Recently Discussed Schemes list.\n"
         "- If the user says something like 'apply for the second one', use the Recently Discussed Schemes list to resolve it to the exact string.\n"
         "- If the user just says 'I want to apply' without specifying, set target_scheme to the Currently Selected Scheme if one exists, otherwise null.\n\n"
         "Output ONLY the JSON object. Do not use markdown blocks, sentences, or punctuation."
     )
+
+    predicted_intent = "CHIT_CHAT"
+    target_scheme_raw = None
+    classification_failed = False
 
     try:
         response = ollama.chat(
@@ -163,11 +210,11 @@ def classify_intent(state: ConversationState) -> dict:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": latest_query}
             ],
-            options={"temperature": 0.0} 
+            options={"temperature": 0.0}
         )
         raw_output = response['message']['content']
         cleaned_output = extract_and_print_thoughts("INTENT CLASSIFIER", raw_output)
-        
+
         # Strip potential markdown formatting
         cleaned_output = cleaned_output.strip()
         if cleaned_output.startswith("```json"):
@@ -176,48 +223,70 @@ def classify_intent(state: ConversationState) -> dict:
             cleaned_output = cleaned_output[3:]
         if cleaned_output.endswith("```"):
             cleaned_output = cleaned_output[:-3]
-            
+
         parsed_json = json.loads(cleaned_output.strip())
         predicted_intent = parsed_json.get("intent", "CHIT_CHAT").strip().upper()
         target_scheme_raw = parsed_json.get("target_scheme")
 
-        if predicted_intent not in ["SCHEME_QUERY", "APPLY_SCHEME", "PROFILE_UPDATE", "SKIP_DOCUMENT", "CHIT_CHAT", "DOC_RECEIVED"]:
+        if predicted_intent not in valid_intents:
             predicted_intent = "CHIT_CHAT"
-
-        # If APPLY_SCHEME, verify the scheme name with fuzzy search if needed
-        if predicted_intent == "APPLY_SCHEME" and target_scheme_raw and target_scheme_raw.lower() != "none":
-            # If it hallucinated or abbreviated, find the closest DB match
-            fuzzy_target = db.find_similar_scheme_name(target_scheme_raw, threshold=0.30)
-            if fuzzy_target:
-                current_target = state.get("target_scheme", "")
-                is_new_scheme = bool(current_target and current_target != fuzzy_target)
-
-                if fuzzy_target in last_schemes:
-                    resp = {"current_intent": "APPLY_SCHEME", "target_scheme": fuzzy_target}
-                else:
-                    # Let's clarify to be safe
-                    resp = {"current_intent": "CLARIFY_SCHEME_NAME", "target_scheme": fuzzy_target, "user_input_scheme": target_scheme_raw}
-                
-                # Critical Bugfix: Prevent old documents bleeding into new schemes!
-                if is_new_scheme:
-                    resp["pending_documents"] = []
-                    resp["collected_documents"] = []
-                    resp["skipped_documents"] = []
-                    resp["awaiting_document"] = ""
-                
-                return resp
-            else:
-                # Could not find a match at all
-                return {"current_intent": "CHIT_CHAT"} # Fallback if we completely fail to resolve it
-                
-        if predicted_intent == "APPLY_SCHEME":
-             return {"current_intent": "APPLY_SCHEME", "target_scheme": ""}
-
     except Exception as e:
         print(f"[Graph Error] Intent classification step failed: {e}")
-        predicted_intent = "CHIT_CHAT"
+        classification_failed = True
+        # An Ollama hiccup must not silently cancel a real, in-progress scheme application —
+        # preserve today's safe default of treating the reply as an automation answer.
+        predicted_intent = "AUTOMATION_RESPONSE" if automation_was_active else "CHIT_CHAT"
 
-    return {"current_intent": predicted_intent}
+    # If automation was active but the citizen's real intent is something else, clean up
+    # the stale automation session so it doesn't linger as "hitl_paused"/"running"/"awaiting_confirm"
+    # forever and keep re-triggering this same gate on the next message.
+    override_fields = {}
+    if automation_was_active and predicted_intent != "AUTOMATION_RESPONSE":
+        print(f"[Graph: classify_intent] Automation was '{state.get('automation_status')}' but citizen intent changed to '{predicted_intent}' — cancelling stale automation session.")
+        try:
+            from product_inference.browser_manager import close_session
+            close_session(state.get("automation_session_id", ""))
+        except Exception as close_err:
+            print(f"[Graph: classify_intent] Could not close stale automation session: {close_err}")
+        override_fields = {
+            "automation_status": "idle",
+            "automation_session_id": "",
+            "automation_unresolved_fields": []
+        }
+
+    if classification_failed:
+        return {"current_intent": predicted_intent, **override_fields}
+
+    # If APPLY_SCHEME, verify the scheme name with fuzzy search if needed
+    if predicted_intent == "APPLY_SCHEME" and target_scheme_raw and target_scheme_raw.lower() != "none":
+        # If it hallucinated or abbreviated, find the closest DB match
+        fuzzy_target = db.find_similar_scheme_name(target_scheme_raw, threshold=0.30)
+        if fuzzy_target:
+            current_target = state.get("target_scheme", "")
+            is_new_scheme = bool(current_target and current_target != fuzzy_target)
+
+            if fuzzy_target in last_schemes:
+                resp = {"current_intent": "APPLY_SCHEME", "target_scheme": fuzzy_target}
+            else:
+                # Let's clarify to be safe
+                resp = {"current_intent": "CLARIFY_SCHEME_NAME", "target_scheme": fuzzy_target, "user_input_scheme": target_scheme_raw}
+
+            # Critical Bugfix: Prevent old documents bleeding into new schemes!
+            if is_new_scheme:
+                resp["pending_documents"] = []
+                resp["collected_documents"] = []
+                resp["skipped_documents"] = []
+                resp["awaiting_document"] = ""
+
+            return {**resp, **override_fields}
+        else:
+            # Could not find a match at all
+            return {"current_intent": "CHIT_CHAT", **override_fields} # Fallback if we completely fail to resolve it
+
+    if predicted_intent == "APPLY_SCHEME":
+        return {"current_intent": "APPLY_SCHEME", "target_scheme": "", **override_fields}
+
+    return {"current_intent": predicted_intent, **override_fields}
 
 
 def handle_chit_chat(state: ConversationState) -> dict:
@@ -646,9 +715,11 @@ def launch_automation(state: ConversationState) -> dict:
         "portal_url": target_url,
         "status": "perceiving",
         "user_vault": merged_vault,
+        "document_vault": state.get("document_vault", {}),
         "actions_to_execute": [],
         "unresolved_questions": [],
-        "history_signatures": []
+        "history_signatures": [],
+        "regressive_gates": {}
     }
 
     try:
@@ -663,6 +734,9 @@ def launch_automation(state: ConversationState) -> dict:
                 "automation_session_id": f"auto_{user_id}",
                 "application_mode": mode,
                 "application_form_url": target_url,
+                "automation_unresolved_fields": auto_result.get("unresolved_fields", []),
+                "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {},  # Fresh launch — start the re-ask bound clean.
+                "automation_page_memory": _page_memory(auto_result),
                 "response": f"[Portal Intercept] **Portal Intercepted for Human Verification**\n\n{q_text}"
             }
         elif new_status == "awaiting_final_confirmation":
@@ -671,6 +745,7 @@ def launch_automation(state: ConversationState) -> dict:
                 "automation_session_id": f"auto_{user_id}",
                 "application_mode": mode,
                 "application_form_url": target_url,
+                "automation_unresolved_fields": [],
                 "response": (
                     f"[Final Review Gate] **Automated Application Form Filled Up to Final Review Gate!**\n\n"
                     "In accordance with Citizen Safety Rules, I have halted right before the final submission button.\n"
@@ -682,19 +757,221 @@ def launch_automation(state: ConversationState) -> dict:
             return {
                 "automation_status": "complete",
                 "automation_session_id": f"auto_{user_id}",
+                "automation_unresolved_fields": [],
                 "response": f"[SUCCESS] **Application Successfully Submitted!**\n\nYour application for **{target_scheme}** has been completed on the official portal."
             }
         else:
             return {
                 "automation_status": "error",
+                "automation_unresolved_fields": [],
                 "response": f"[WARN] **Automation Notice:** The portal check resulted in status: `{new_status}`. Please check the portal manually at: {target_url}"
             }
     except Exception as e:
         print(f"[Graph: launch_automation Error] {e}")
         return {
             "automation_status": "error",
+            "automation_unresolved_fields": [],
             "response": f"[ERROR] **Automation Error:** Encountered an unexpected issue while interacting with the portal: {e}"
         }
+
+
+def _execute_confirmed_submission(session_id: str, state: ConversationState) -> dict:
+    """
+    Presses the portal's final submission control — the one action in the whole flow that cannot be
+    undone, and the only one reached solely because the citizen typed CONFIRM on this turn.
+
+    Three things have to hold for that press to actually complete an application, and each was missing:
+      * the right control has to be found. It used to be located by English button text, which finds
+        nothing on a portal reading "जमा करें" and could match the wrong button on the most
+        consequential click in the flow. Which control submits is a reading of the screen, so the model
+        makes it (llm_planner.identify_submit_control) and Python presses what it names — or nothing.
+      * a native "are you sure?" dialog has to be accepted. The interceptor dismisses dialogs by
+        default, which is correct in general but silently discarded the submission the citizen had just
+        authorized. A one-shot, expiring authorization is armed here, in the CONFIRM path only.
+      * the outcome has to be reported honestly. A screenshot of whatever the portal ended up showing
+        is captured for the citizen's records, and a press that could not be made is said out loud
+        rather than reported as a submission.
+    """
+    from product_inference.browser_manager import (
+        get_active_page, run_pw, authorize_one_dialog
+    )
+    from product_inference.perception_engine import perceive_dom_state
+    from product_inference.llm_planner import identify_submit_control
+
+    active_page = run_pw(get_active_page, session_id)
+    if not active_page or run_pw(active_page.is_closed):
+        return {
+            "automation_status": "error",
+            "response": (
+                "[WARN] **The portal session has closed**\n\nI could not press Submit because the browser "
+                f"session ended. Nothing was submitted. You can finish at: {state.get('application_form_url', 'the scheme portal')}"
+            )
+        }
+
+    perception = run_pw(perceive_dom_state, active_page)
+    submit_id = identify_submit_control(perception)
+    if submit_id is None:
+        return {
+            "automation_status": "awaiting_confirm",
+            "response": (
+                "[WARN] **I could not identify the submit control**\n\nRather than press the wrong button on "
+                "the final screen, I have stopped. Nothing was submitted. The portal is still open at the "
+                "review screen — you can press Submit yourself, or reply **CONFIRM** to let me try again."
+            )
+        }
+
+    shot_path = os.path.join("screenshots", f"{session_id}_submitted.png")
+    try:
+        # Authorize the portal's own confirmation dialog, then press. Armed immediately before the
+        # click and expiring on its own, so it can only ever cover this press.
+        run_pw(authorize_one_dialog, session_id)
+        run_pw(active_page.locator(f'[data-ym-id="{submit_id}"]').first.click, timeout=10000)
+        run_pw(active_page.wait_for_timeout, 2500)
+        os.makedirs("screenshots", exist_ok=True)
+        run_pw(active_page.screenshot, path=shot_path, full_page=True)
+    except Exception as e:
+        print(f"[Confirmation Submit Notice] {e}")
+        return {
+            "automation_status": "error",
+            "response": (
+                f"[WARN] **The submission press failed**\n\n`{e}`\n\nI cannot confirm the application was "
+                f"submitted. Please check the open portal window before trying again."
+            )
+        }
+
+    # Say what actually happened. Announcing a submission the portal never made would leave a citizen
+    # believing their application is filed when it is not — the worst failure this flow can produce,
+    # and one that already occurred: the press was reported as success while the portal sat unchanged
+    # on the review screen. Read from the page rather than matched against English phrases, which say
+    # nothing on a portal written in Hindi or Tamil.
+    from product_inference.llm_planner import page_confirms_submission
+    try:
+        page_text = run_pw(active_page.locator("body").inner_text, timeout=5000)
+    except Exception:
+        page_text = ""
+
+    if not page_confirms_submission(page_text):
+        return {
+            "automation_status": "awaiting_confirm",
+            "response": (
+                "[WARN] **I pressed Submit but the portal has not confirmed it**\n\nThe page is not "
+                "showing an acknowledgement, so I cannot tell you the application is filed. Please check "
+                "the attached screenshot and the open portal window. Reply **CONFIRM** to press again if "
+                "it is still waiting."
+            )
+        }
+
+    return {
+        "automation_status": "complete",
+        "response": (
+            "[SUCCESS] **Application Submitted**\n\nYour CONFIRM was received, the portal's final "
+            "submission control was pressed, and the portal has confirmed receipt. The attached "
+            "screenshot shows exactly what it displayed — please save any acknowledgement number for tracking."
+        )
+    }
+
+
+def _page_memory(auto_result: dict) -> dict:
+    """
+    What the automation subgraph learned about the portal's own navigation, lifted out so it can
+    survive a HITL pause. Each resume is a fresh subgraph invocation, so anything the ReAct loop
+    observed — which screens it has already stood on, which navigation control on which screen
+    turned out to move backwards — is lost unless ConversationState carries it across the pause.
+    """
+    return {
+        "history_signatures": list(auto_result.get("history_signatures") or []),
+        "regressive_gates": {k: list(v) for k, v in (auto_result.get("regressive_gates") or {}).items()},
+        "pressed_gates": {k: list(v) for k, v in (auto_result.get("pressed_gates") or {}).items()},
+    }
+
+
+def _hitl_field_identity(unresolved_fields: list) -> str:
+    """
+    Identity of the field a paused automation turn is asking about. The planner asks about exactly one
+    field per turn (the first), so this is what the citizen's next reply will be attributed to. Used
+    only to notice that the SAME field is being asked again.
+    """
+    if not unresolved_fields:
+        return ""
+    first = unresolved_fields[0] or {}
+    return str(first.get("name") or first.get("label") or first.get("id") or "")
+
+
+# How many times the citizen may answer the same field before we stop asking and hand the portal back
+# to them. A wrong captcha or a mistyped OTP genuinely deserves retries; an unanswerable field must
+# not be able to spin forever.
+MAX_REPEAT_HITL_ASKS = 3
+
+
+def _inject_hitl_answer(session_id: str, unresolved_fields: list, answer: str) -> bool:
+    """
+    Writes the citizen's reply straight into the element whose question they just answered.
+
+    A portal challenge — an OTP, a captcha — is a live, single-use response, not durable vault data.
+    Routing it through the vault and expecting the classifier to re-discover which field it belongs
+    to is unreliable (observed live: the planner offered the citizen's mobile number for a field
+    labelled "Enter Verification Code") and also unnecessary: we recorded which element prompted the
+    question, so the answer's destination is a known fact rather than something to infer. Deciding
+    *what* to ask stays a semantic judgment; delivering the answer to the field that asked is
+    mechanics.
+    """
+    if not unresolved_fields or not answer:
+        return False
+
+    field = unresolved_fields[0] or {}
+    el_id = field.get("id")
+    if el_id is None:
+        return False
+
+    try:
+        from product_inference.browser_manager import get_active_page, run_pw
+        page = run_pw(get_active_page, session_id)
+        if not page or run_pw(page.is_closed):
+            return False
+
+        locator = run_pw(page.locator, f'[data-ym-id="{el_id}"]')
+        if run_pw(locator.count) == 0:
+            return False
+        target = locator.first
+
+        # `data-ym-id` is re-assigned on every perception pass, so confirm this really is still the
+        # element we asked about before typing the citizen's words into it.
+        recorded_name = str(field.get("name") or "")
+        if recorded_name:
+            live_name = run_pw(target.get_attribute, "name") or ""
+            if live_name != recorded_name:
+                print(f"[HITL Inject] Element #{el_id} is now '{live_name}', not '{recorded_name}' — skipping direct injection.")
+                return False
+
+        # Only an element that actually accepts typed text may be filled — Playwright raises
+        # otherwise ("Element is not an <input>, <textarea> or [contenteditable]", hit live when the
+        # field that asked was a toggle). The perceived `type` recorded at question time is not a
+        # safe proxy for this, so ask the live DOM: the set below is exactly the input types the HTML
+        # spec gives no text value to type into. A toggle's answer is a yes/no reading that belongs to
+        # the classifier (llm_planner.verify_checkbox_against_vault) and a file input needs a verified
+        # document path, so both correctly fall out here rather than being special-cased.
+        shape = run_pw(target.evaluate, """el => ({
+            tag: el.tagName.toLowerCase(),
+            type: (el.getAttribute('type') || 'text').toLowerCase(),
+            editable: el.isContentEditable === true
+        })""")
+        NON_TEXT_INPUTS = {"checkbox", "radio", "file", "submit", "button", "reset", "image", "hidden", "range", "color"}
+        fillable = (
+            shape.get("editable")
+            or shape.get("tag") == "textarea"
+            or (shape.get("tag") == "input" and shape.get("type") not in NON_TEXT_INPUTS)
+        )
+        if not fillable:
+            print(f"[HITL Inject] Element #{el_id} ({shape.get('tag')}/{shape.get('type')}) takes no typed value — "
+                  f"leaving it to the classifier and the vault write-back.")
+            return False
+
+        run_pw(target.fill, str(answer))
+        print(f"[HITL Inject] Wrote the citizen's answer into the field that asked for it ('{recorded_name or el_id}').")
+        return True
+    except Exception as e:
+        print(f"[HITL Inject Notice] Could not write the answer into the field that asked: {e}")
+        return False
 
 
 def handle_automation_response(state: ConversationState) -> dict:
@@ -711,18 +988,7 @@ def handle_automation_response(state: ConversationState) -> dict:
     if status == "awaiting_confirm":
         if latest_msg.upper() == "CONFIRM":
             print(f"[Graph: handle_automation_response] Citizen confirmed submission! Executing final button...")
-            from product_inference.browser_manager import get_active_page, run_pw
-            active_page = run_pw(get_active_page, session_id)
-            if active_page and not run_pw(active_page.is_closed):
-                try:
-                    run_pw(active_page.locator("button:has-text('Submit'), input[type='submit'], button:has-text('Confirm')").first.click, timeout=10000)
-                    time.sleep(3)
-                except Exception as e:
-                    print(f"[Confirmation Submit Notice] {e}")
-            return {
-                "automation_status": "complete",
-                "response": "[SUCCESS] **Application Officially Submitted!**\n\nYour confirmation was received and the final submission has been executed."
-            }
+            return _execute_confirmed_submission(session_id, state)
         else:
             return {
                 "response": "[WARN] **Waiting for Confirmation**\n\nI am currently holding at the Final Review screen. Please reply exactly with **CONFIRM** when you are ready to submit, or type 'cancel' to abort."
@@ -733,19 +999,55 @@ def handle_automation_response(state: ConversationState) -> dict:
         print(f"[Graph: handle_automation_response] Injecting citizen input '{latest_msg}' into paused session...")
         merged_vault = dict(state.get("user_profile", {}))
         merged_vault.update(state.get("vault_snapshot", {}))
-        
+
+        # Every answer given so far this run, not just this turn's. Each resume builds a fresh vault
+        # for a fresh subgraph invocation, so an answer written on one turn was gone by the next —
+        # the citizen agreed to a consent box, the next cycle found nothing backing it and asked
+        # again, and the re-ask bound eventually handed the portal back (observed live on
+        # 'not_a_robot'). Text answers survived only because they also go into the field itself.
+        hitl_answers = dict(state.get("automation_hitl_answers") or {})
+        merged_vault.update(hitl_answers)
+
         merged_vault["hitl_input"] = latest_msg
         if re.match(r'^\d{4,8}$', latest_msg):
             merged_vault["otp"] = latest_msg
+
+        # Also write the citizen's answer under the actual unresolved field's name,
+        # mirroring hitl_intercept_node's Fix-6d logic (automation_graph.py) — the generic
+        # "hitl_input"/"otp" keys above never match verify_field_against_vault's keyword-based
+        # check for any non-OTP field (e.g. a "State" dropdown), which otherwise loops forever
+        # re-asking the same question. Strictly additive: OTP mid-flow intercepts never populate
+        # automation_unresolved_fields, so that path is unaffected.
+        # The planner asks about exactly ONE field per paused turn (the first entry), so this reply
+        # belongs to that field unambiguously — no need for the previous "only write back when exactly
+        # one field is unresolved" guard, which silently skipped the write-back entirely whenever a
+        # page had two things missing (observed live on the OTP step: nothing was ever saved, so the
+        # same questions came back every cycle). `name` is the element's DOM name, a stable key the
+        # next classification round reliably matches; `label` remains a fallback for older payloads.
+        unresolved_fields = state.get("automation_unresolved_fields", [])
+        if unresolved_fields:
+            field_name = unresolved_fields[0].get("name") or unresolved_fields[0].get("label", "").lower()
+            if field_name:
+                merged_vault[field_name] = latest_msg
+                hitl_answers[field_name] = latest_msg
+
+        # Deliver the answer to the element that asked for it, so a live portal challenge does not
+        # depend on the classifier re-deriving where it belongs. The vault write-back above still
+        # happens: it is what makes a DURABLE field (a state, a name) match on later cycles and on
+        # later schemes, whereas this injection is what makes a single-use challenge work at all.
+        _inject_hitl_answer(session_id, unresolved_fields, latest_msg)
 
         resume_state = {
             "session_id": session_id,
             "portal_url": state.get("application_form_url", ""),
             "status": "perceiving",
             "user_vault": merged_vault,
+            "document_vault": state.get("document_vault", {}),
             "actions_to_execute": [],
             "unresolved_questions": [],
-            "retries": 0
+            "retries": 0,
+            # Carry forward what the loop already worked out about this portal's navigation.
+            **(state.get("automation_page_memory") or {}),
         }
 
         try:
@@ -754,22 +1056,68 @@ def handle_automation_response(state: ConversationState) -> dict:
             questions = auto_result.get("unresolved_questions", [])
 
             if new_status == "hitl_paused":
+                # *** Loop bound: never re-ask the same field indefinitely ***
+                # A field the portal keeps rejecting (a mis-read captcha, a value the portal validates
+                # differently than we do) would otherwise pause -> ask -> answer -> pause forever, since
+                # each resume is a fresh graph invocation with no memory of the last one. Counting
+                # asks here — in ConversationState, which survives across turns via the checkpointer
+                # — is the only place that memory exists. This makes non-convergence structurally
+                # impossible for ANY field rather than for the specific ones we happen to have seen.
+                #
+                # Tallied PER FIELD rather than as a consecutive streak: a page with two stubborn
+                # fields alternates between them (observed live, OTP <-> captcha), which resets a
+                # streak counter every turn and slips the bound entirely. A per-field tally cannot
+                # be evaded by interleaving.
+                new_unresolved = auto_result.get("unresolved_fields", [])
+                asked_identity = _hitl_field_identity(unresolved_fields)
+                still_asking = _hitl_field_identity(new_unresolved)
+                ask_counts = dict(state.get("automation_ask_counts") or {})
+                if asked_identity:
+                    ask_counts[asked_identity] = ask_counts.get(asked_identity, 0) + 1
+
+                if still_asking and ask_counts.get(still_asking, 0) >= MAX_REPEAT_HITL_ASKS:
+                    from product_inference.browser_manager import close_session
+                    label = (new_unresolved[0] or {}).get("label") or still_asking
+                    print(f"[Graph: handle_automation_response] '{still_asking}' answered {ask_counts[still_asking]}x and still being asked — handing the portal back to the citizen.")
+                    close_session(session_id)
+                    return {
+                        "automation_status": "error",
+                        "automation_unresolved_fields": [],
+                        "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {},
+                        "response": (
+                            f"[WARN] **I couldn't get past “{label}” on the portal**\n\n"
+                            f"The portal kept asking for it again after each of your answers, so I've stopped "
+                            f"rather than keep you in a loop.\n\n"
+                            f"Everything I filled in so far is saved in your vault. You can finish this step "
+                            f"yourself at: {state.get('application_form_url', 'the scheme portal')}"
+                        )
+                    }
+
                 q_text = "\n".join(questions) if questions else "Further verification required."
-                return {"automation_status": "hitl_paused", "response": f"[Portal Intercept] **Verification Update**\n\n{q_text}"}
+                return {
+                    "automation_status": "hitl_paused",
+                    "automation_unresolved_fields": new_unresolved,
+                    "automation_ask_counts": ask_counts,
+                    "automation_page_memory": _page_memory(auto_result),
+                    "automation_hitl_answers": hitl_answers,
+                    "response": f"[Portal Intercept] **Verification Update**\n\n{q_text}"
+                }
             elif new_status == "awaiting_final_confirmation":
                 return {
                     "automation_status": "awaiting_confirm",
+                    "automation_unresolved_fields": [],
+                    "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {},
                     "response": (
                         f"[Final Review Gate] **Form Filled Up to Final Review Gate!**\n\n"
                         "Please review the portal screenshot carefully. If everything looks correct, reply with **CONFIRM** to execute the final official submission!"
                     )
                 }
             elif new_status == "form_complete":
-                return {"automation_status": "complete", "response": "[SUCCESS] **Application Successfully Submitted!**"}
+                return {"automation_status": "complete", "automation_unresolved_fields": [], "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {}, "response": "[SUCCESS] **Application Successfully Submitted!**"}
             else:
-                return {"automation_status": "error", "response": f"[WARN] **Portal Status Update:** `{new_status}`"}
+                return {"automation_status": "error", "automation_unresolved_fields": [], "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {}, "response": f"[WARN] **Portal Status Update:** `{new_status}`"}
         except Exception as e:
-            return {"automation_status": "error", "response": f"[ERROR] **Automation Error:** {e}"}
+            return {"automation_status": "error", "automation_unresolved_fields": [], "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {}, "response": f"[ERROR] **Automation Error:** {e}"}
 
     return {"response": "No active automation session in progress."}
 

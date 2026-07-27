@@ -7,12 +7,14 @@ LangGraph ReAct StateMachine & HITL Gates for Phase 8 Universal Dynamic Web Auto
 
 Key Features & Architectural Fixes (Claude Sonnet & Master Plan Review):
   1. ReAct Loop (`perceive → plan → execute → check`):
-     Orchestrates browser session management, DOM perception, dual-stage LLM planning,
+     Orchestrates browser session management, DOM perception, LLM field classification,
      and Playwright execution in an autonomous loop across multi-page wizards.
-  2. Smart Cascading Dropdown Detection (Fix 6c):
-     During `execute_node`, snapshots DOM element count before/after `select` and `click`
-     actions. If new dependent fields (e.g. District/Block) dynamically mount mid-batch,
-     breaks out immediately and routes to `perceive_node` to index fresh elements.
+  2. Stale-Plan Guard (`execute_node`):
+     An action batch is planned against the DOM as it looked before any of it ran. Snapshots
+     the count of interactive elements (`INTERACTIVE_SELECTOR`, buttons included) before and
+     after every action; any change means the rest of the batch is reasoning about a page that
+     no longer exists, so it breaks out to `perceive_node` for a fresh plan. Covers dependent
+     fields mounting (State → District), step transitions, and controls revealed by an upload.
   3. HITL Clarify & OTP/Captcha Intercept Gates:
      If `llm_planner` returns `hitl_clarify` OR if `execute_node` detects OTP/Captcha
      keywords/inputs on the live DOM, immediately halts the graph (`status: hitl_intercept`).
@@ -43,8 +45,19 @@ from product_inference.browser_manager import (
     close_session,
     run_pw
 )
-from product_inference.perception_engine import perceive_dom_state
-from product_inference.llm_planner import plan_wizard_step, DEFAULT_PLANNER_MODEL
+from product_inference.perception_engine import perceive_dom_state, compute_control_state_fingerprint
+from product_inference.llm_planner import plan_wizard_step, press_finally_submits, DEFAULT_PLANNER_MODEL
+
+
+# Everything a citizen could interact with on a form page. Used as a cheap fingerprint of the
+# page's interactive surface: if this count changes mid-batch, the remaining planned actions were
+# reasoned about a DOM that no longer exists and must be re-planned. Buttons are deliberately
+# included — controls appearing or disappearing is exactly the signal we need to catch.
+INTERACTIVE_SELECTOR = "input, select, textarea, button, [role='button']"
+
+# How many times the loop may accept "the form's own state changed" as progress on one screen
+# before treating the screen as stuck. See check_status_node.
+MAX_IN_PLACE_PROGRESS = 6
 
 
 # ==============================================================================
@@ -59,7 +72,13 @@ class AutomationState(TypedDict, total=False):
     perception: dict[str, Any]               # Output from Step 2 perception engine
     page_signature: str                      # Signature of the current/previous page
     history_signatures: list[str]            # Tracked signatures to catch infinite loops
-    actions_to_execute: list[dict[str, Any]] # Playwright commands from Step 3 Stage 2
+    regressive_gates: dict[str, list[str]]   # screen signature -> gate identities observed to go backwards
+    control_state: str                       # fingerprint of what the screen's controls currently hold
+    pressed_gates: dict[str, list[str]]      # screen signature -> controls pressed there that changed nothing
+    clicked_gates: list[str]                 # controls clicked in the batch just executed
+    clicked_confirm_gates: list[str]         # of those, the ones submitting a single field for checking
+    in_place_progress: int                   # accepted control-state changes on the current screen
+    actions_to_execute: list[dict[str, Any]] # Playwright commands derived by `llm_planner`
     status: str                              # Current graph state (`perceiving`, `planning`, `executing`, etc.)
     retries: int                             # Retry count when page signature stays unchanged
     unresolved_questions: list[str]          # Clarifying questions for citizen
@@ -90,7 +109,11 @@ def perceive_node(state: AutomationState) -> AutomationState:
         if not active_page or run_pw(active_page.is_closed):
             ctx, page = run_pw(launch_isolated_profile, session_id, portal_url=portal_url, headless=False)
             active_page = run_pw(get_active_page, session_id) or page
-        elif portal_url and portal_url != "about:blank" and active_page.url != portal_url:
+        elif portal_url and portal_url != "about:blank" and active_page.url.rstrip("/") != portal_url.rstrip("/"):
+            # Browsers normalize a bare-domain URL with a trailing "/" once loaded
+            # (e.g. "http://localhost:5173" -> "http://localhost:5173/"), so a strict equality
+            # check here was always true and re-navigated on EVERY perceive_node call, wiping
+            # the entire in-progress wizard's form state each cycle — reproduced live.
             run_pw(active_page.goto, portal_url, timeout=30000)
     except Exception as e:
         print(f"[perceive_node Error] Browser launch failed: {e}")
@@ -109,6 +132,7 @@ def perceive_node(state: AutomationState) -> AutomationState:
     return {
         "perception": perception,
         "page_signature": new_sig,
+        "control_state": perception.get("control_state", ""),
         "history_signatures": history + [new_sig] if new_sig not in history else history,
         "status": "planning"
     }
@@ -116,20 +140,31 @@ def perceive_node(state: AutomationState) -> AutomationState:
 
 def plan_node(state: AutomationState) -> AutomationState:
     """
-    Step 3: Calls Dual-Stage LLM Planner (`llm_planner.py`) to classify fields and generate actions.
+    Step 3: Calls `llm_planner.plan_wizard_step` to classify fields against the citizen's vault
+    and derive the resulting Playwright action batch.
     """
     session_id = state["session_id"]
     perception = state.get("perception", {})
     user_vault = state.get("user_vault", {})
     document_vault = state.get("document_vault", {})
 
-    print(f"[Graph: plan_node] Session: {session_id} | Calling Dual-Stage Planner...")
+    print(f"[Graph: plan_node] Session: {session_id} | Classifying fields & deriving actions...")
+
+    # Anything this screen's navigation controls have already been observed to do (see
+    # check_status_node) is fed back into planning, so a mis-judged "Back" is pressed at most once.
+    blocked_here = set(state.get("regressive_gates", {}).get(state.get("page_signature", ""), []))
+    if blocked_here:
+        print(f"  [Loop Memory] {len(blocked_here)} navigation control(s) on this screen are known to move backwards.")
+
+    pressed_here = set(state.get("pressed_gates", {}).get(state.get("page_signature", ""), []))
 
     plan_result = plan_wizard_step(
         perception=perception,
         user_vault=user_vault,
         document_vault=document_vault,
-        model=DEFAULT_PLANNER_MODEL
+        model=DEFAULT_PLANNER_MODEL,
+        regressive_gates=blocked_here,
+        pressed_gates=pressed_here
     )
 
     planner_status = plan_result.get("status")
@@ -145,6 +180,39 @@ def plan_node(state: AutomationState) -> AutomationState:
         }
     elif planner_status == "actions_ready":
         actions = plan_result.get("actions", [])
+
+        # *** Zero auto-submit: refuse the press, do not merely forbid it in a prompt ***
+        # Observed live: Stage 1 classified "Submit Application" as a forward gate — its own reasoning
+        # read "is an action gate that submits the application" — and the loop pressed it with no
+        # citizen authorization. Nothing was filed only because that portal raises a native confirm
+        # dialog, which the interceptor dismisses; a portal that submits on click would have filed the
+        # application outright. The review-screen check cannot save this, because it runs in
+        # check_status_node — after the click.
+        #
+        # So before any press, the strongest local model is asked which control on this screen finally
+        # submits (the same reading used for the citizen's own CONFIRM). If a planned click is that
+        # control, the batch is dropped and the graph halts at the confirmation gate instead.
+        el_by_id = {el["id"]: el for el in perception.get("elements_list", [])}
+        for act in actions:
+            if act.get("action") != "click":
+                continue
+            label = str(el_by_id.get(act["element_id"], {}).get("label", ""))
+            # Context is the OTHER CONTROLS, not every label on screen. Handing the model the field
+            # labels too ("Full Name", "Resident State") made it read "Save & Proceed to Step 2" as
+            # the final submission — a screen full of empty fields apparently looks like something
+            # being filed — and the guard then halted the run on Step 1 of 4. The same control with
+            # only its sibling buttons for context reads correctly, in every language tried.
+            others = [
+                str(el.get("label", "")) for el in perception.get("elements_list", [])
+                if el.get("id") != act["element_id"]
+                and (str(el.get("tag", "")).lower() in ("button", "a")
+                     or str(el.get("type", "")).lower() in ("submit", "button", "reset"))
+            ]
+            if label and press_finally_submits(label, others):
+                print(f"  [ZERO AUTO-SUBMIT] Planned click on '{label}' would file the application. "
+                      f"Refusing it and halting for the citizen's explicit CONFIRM.")
+                return {"status": "final_confirmation", "actions_to_execute": []}
+
         print(f"  [Actions Generated] -> {len(actions)} execution steps ready.")
         # Note: retries is intentionally NOT reset here. check_status_node already resets it
         # to 0 when the page signature genuinely changes (real progress). Resetting it here too
@@ -183,6 +251,16 @@ def execute_node(state: AutomationState) -> AutomationState:
 
     print(f"[Graph: execute_node] Session: {session_id} | Executing {len(actions)} actions...")
 
+    # Navigation controls actually pressed in this batch. Reported rather than judged here:
+    # whether a press accomplished anything is check_status_node's call, since only it sees what the
+    # page did afterwards. Always reported (empty list included) so a later batch never inherits a
+    # stale entry.
+    pressed_here: list[str] = []
+    confirmed_here: list[str] = []
+
+    def _with_presses(payload: dict) -> dict:
+        return {**payload, "clicked_gates": list(pressed_here), "clicked_confirm_gates": list(confirmed_here)}
+
     for i, action in enumerate(actions):
         el_id = action["element_id"]
         act_type = action["action"]
@@ -198,7 +276,7 @@ def execute_node(state: AutomationState) -> AutomationState:
             continue
 
         try:
-            pre_count = run_pw(active_page.locator("input, select, textarea").count)
+            pre_count = run_pw(active_page.locator(INTERACTIVE_SELECTOR).count)
 
             if act_type == "type":
                 run_pw(locator.first.fill, str(val))
@@ -210,9 +288,18 @@ def execute_node(state: AutomationState) -> AutomationState:
                     run_pw(locator.first.select_option, value=str(val))
             elif act_type == "check" or act_type == "click":
                 run_pw(locator.first.click)
+                # Recorded from what ran, not from the plan: a batch can break out early, and a gate
+                # that was never clicked must not be treated as tried.
+                if act_type == "click" and action.get("gate_identity"):
+                    pressed_here.append(action["gate_identity"])
+                    if action.get("confirms_entry"):
+                        confirmed_here.append(action["gate_identity"])
             elif act_type == "upload":
                 if os.path.exists(str(val)):
                     run_pw(locator.first.set_input_files, str(val))
+                    # Uploads are I/O: portals commonly show a transient "uploading…" state and only
+                    # then reveal/enable whatever comes next. Allow for that before measuring the DOM.
+                    run_pw(active_page.wait_for_timeout, 1200)
                 else:
                     print(f"     [WARN] Document file path '{val}' not found on disk!")
                     continue
@@ -220,11 +307,41 @@ def execute_node(state: AutomationState) -> AutomationState:
             # Brief pause for JavaScript re-renders or API calls to complete
             run_pw(active_page.wait_for_timeout, 600)
 
-            # *** FIX 6c: Smart Cascading Dropdown Detection ***
-            post_count = run_pw(active_page.locator("input, select, textarea").count)
-            if pre_count != post_count and i < len(actions) - 1:
-                print(f"  [Cascade Detected] DOM element count changed ({pre_count} -> {post_count}) after action #{el_id}. Re-perceiving immediately!")
-                return {"status": "perceiving"}
+            # A press that erased what the citizen had already entered is not repeated on this screen:
+            # a captcha "Refresh" clears the box beside it, so the answer is gone and the portal asks
+            # again — repeat that and the step never completes. Judged from what the press did, not
+            # from what Stage 1 called the control, because a 4B classifier called Refresh a forward
+            # control on every cycle it saw one. Checked at the press itself, since the mid-flow
+            # intercept below returns before any post-batch check could run.
+            #
+            # Controls that submit a single field for checking are exempt: a portal clearing a
+            # rejected captcha is the value being wrong, not the control being destructive.
+            if act_type == "click" and not action.get("confirms_entry"):
+                erased = _entries_erased_by(state, active_page)
+                if erased and action.get("gate_identity"):
+                    regressive = {k: list(v) for k, v in (state.get("regressive_gates") or {}).items()}
+                    screen = state.get("page_signature", "")
+                    if action["gate_identity"] not in regressive.setdefault(screen, []):
+                        regressive[screen].append(action["gate_identity"])
+                    print(f"  [Entry Erased] Pressing '{action['gate_identity']}' emptied {erased} — that "
+                          f"control will not be pressed on this screen again.")
+                    return _with_presses({"status": "perceiving", "regressive_gates": regressive})
+
+            # *** Stale-plan guard: re-perceive whenever the page's interactive surface changed ***
+            # The batch was planned against the DOM as it looked before any of these actions ran. The
+            # moment an action changes what's on the page — a dependent select mounting (State ->
+            # District), a step advancing, or a completed upload revealing the next control — every
+            # remaining queued action is reasoning about a page that no longer exists. Rather than
+            # enumerate those cases individually, treat any change to the interactive surface as
+            # invalidating the rest of the plan and go re-perceive.
+            #
+            # This must include buttons, not just form fields: a completed upload often adds or
+            # enables a navigation control without touching the input/select/textarea count at all,
+            # which is precisely the gap that let stale navigation clicks through.
+            post_count = run_pw(active_page.locator(INTERACTIVE_SELECTOR).count)
+            if pre_count != post_count:
+                print(f"  [DOM Changed] Interactive element count {pre_count} -> {post_count} after action #{el_id}. Re-perceiving before continuing.")
+                return _with_presses({"status": "perceiving"})
 
             # *** HITL GATE: Mid-Flow OTP or Captcha Interception ***
             page_text_lower = run_pw(active_page.content).lower()
@@ -236,18 +353,63 @@ def execute_node(state: AutomationState) -> AutomationState:
                     run_pw(active_page.screenshot, path=shot_path, full_page=True)
                 except Exception:
                     pass
-                return {
+                return _with_presses({
                     "status": "hitl_intercept",
                     "unresolved_questions": ["[OTP/Captcha Required] Portal requires verification. Please enter the code sent to your mobile or shown on screen:"],
                     "actions_to_execute": actions[i+1:] # Save remaining actions if any
-                }
+                })
 
         except Exception as e:
             print(f"     [Action Error on ID #{el_id}] {e}")
             # Continue executing other independent fields if one non-critical action stumbles
 
     print("  [Execution Batch Completed] Advancing to check status node.")
-    return {"status": "check"}
+    return _with_presses({"status": "check"})
+
+
+def _entries_erased_by(state: AutomationState, active_page: Page) -> list[str]:
+    """
+    Fields that held an answer before this batch ran and are now empty.
+
+    Wiping entered data is the one thing no control should be allowed to do twice. A captcha's
+    "Refresh" clears the box it sits beside (as does a Reset or a Clear), so the citizen's answer is
+    gone and the portal asks again — repeat that and the run never reaches the end of the step, which
+    is exactly how three separate attempts died before Step 4. This is read from the DOM instead of
+    being taken on trust from Stage 1, because a 4B classifier called Refresh a forward control on
+    every single cycle it saw one, whatever the schema offered it.
+
+    Fields this batch filled itself are excluded: a dependent select legitimately resets when its
+    parent changes (State -> District), and that is our own doing, not the control's.
+    """
+    before = {
+        el["id"]: str(el.get("value") or "")
+        for el in state.get("perception", {}).get("elements_list", [])
+        if str(el.get("value") or "").strip()
+    }
+    if not before:
+        return []
+    just_filled = {
+        a.get("element_id") for a in state.get("actions_to_execute", [])
+        if a.get("action") in ("type", "select", "upload")
+    }
+    try:
+        live = run_pw(active_page.evaluate, """() => Object.fromEntries(
+            Array.from(document.querySelectorAll('[data-ym-id]')).map(el => [el.getAttribute('data-ym-id'), el.value || ''])
+        )""")
+    except Exception:
+        return []
+
+    erased = []
+    labels = {el["id"]: el.get("label", el["id"]) for el in state.get("perception", {}).get("elements_list", [])}
+    for el_id, old_value in before.items():
+        if el_id in just_filled:
+            continue
+        # Absent from the live map means the node was replaced by a re-render, which says nothing
+        # about whether its value was deliberately wiped.
+        current = live.get(str(el_id))
+        if current is not None and old_value and not str(current).strip():
+            erased.append(str(labels.get(el_id, el_id)))
+    return erased
 
 
 def check_status_node(state: AutomationState) -> AutomationState:
@@ -285,18 +447,114 @@ def check_status_node(state: AutomationState) -> AutomationState:
 
     # If signature changed, we successfully navigated to a new wizard step!
     if new_sig != old_sig:
+        # ...unless it is a screen we have already been on. A changed signature only proves the page
+        # moved, not that it moved forward: a control Stage 1 judged as forward-advancing may in fact
+        # be a "Back"/"Previous" button, and the two screens then ping-pong until max_turns (observed
+        # live between Steps 1 and 2 of the mock portal). Rather than guess from the button's wording,
+        # remember what the browser actually did and let plan_node stop offering that control on that
+        # screen. The observation is per-screen, so the same label elsewhere is judged on its own.
+        history = state.get("history_signatures", [])
+        # "Seen before" alone is not enough: after a wrongly-pressed Back, pressing the genuine
+        # forward gate legitimately lands on a screen we have already been on, and flagging that
+        # would eventually block every control on the form. `history_signatures` is in first-visit
+        # order, so it also tells us the DIRECTION: landing on a screen first seen EARLIER than the
+        # one we just left is a step backwards; landing on a later one is progress we are re-making.
+        went_backwards = (
+            new_sig in history and old_sig in history
+            and history.index(new_sig) < history.index(old_sig)
+        )
+        if went_backwards:
+            regressive = {k: list(v) for k, v in (state.get("regressive_gates") or {}).items()}
+            pressed = next(
+                (a.get("gate_identity") for a in reversed(state.get("actions_to_execute", []))
+                 if a.get("action") == "click" and a.get("gate_identity")),
+                None
+            )
+            if pressed and pressed not in regressive.get(old_sig, []):
+                regressive.setdefault(old_sig, []).append(pressed)
+                print(f"  -> [Went Backwards] Landed on an earlier screen than the one we left. Marking the "
+                      f"control '{pressed}' as backwards for that screen; it will not be pressed there again.")
+            return {
+                "status": "perceiving",
+                "page_signature": new_sig,
+                "regressive_gates": regressive,
+                "in_place_progress": 0,
+                "retries": 0
+            }
         print("  -> [Step Advanced] Page signature changed. Looping to perceive new wizard screen.")
+        # The gate we pressed did its job, so the screen we left keeps no grudge against it: coming
+        # back to that screen later (with its fields already filled) has to be able to press the very
+        # same control again. Only presses that changed nothing are remembered, below.
+        cleared = {k: list(v) for k, v in (state.get("pressed_gates") or {}).items()}
+        cleared.pop(old_sig, None)
         return {
             "status": "perceiving",
             "page_signature": new_sig,
+            "pressed_gates": cleared,
+            "in_place_progress": 0,
             "retries": 0
         }
     else:
-        # Signature unchanged after clicking Next/Submit. Check retries to avoid infinite loops
+        # Same screen. That is not the same thing as nothing having happened: a step that verifies an
+        # OTP, then a captcha, then a consent box does all of it without changing URL/title/heading,
+        # and counting each of those as a failed retry aborted the run three actions short of the
+        # Proceed button (observed live on Step 3). So ask what the controls now HOLD: if that changed,
+        # the last action did land and the loop should carry on planning the next one.
+        #
+        # Bounded, because "something changed" is a weaker signal than "the screen changed" and a page
+        # that re-renders on every touch could otherwise spin forever. Successful in-place steps are
+        # few by nature; a page needing more than this many is not converging.
+        # A press that erased what the citizen had already entered must never happen twice on this
+        # screen, whatever Stage 1 says the control is for. Recorded in the same memory as a control
+        # observed to move backwards, because the consequence is the same: do not press it here again.
+        erased = _entries_erased_by(state, active_page)
+        # A control that submits a field for checking is exempt: the portal clearing the box means the
+        # value was rejected, not that the control is destructive, and blocking it would make the field
+        # impossible to ever satisfy.
+        confirming = set(state.get("clicked_confirm_gates") or [])
+        clicked = [g for g in (state.get("clicked_gates") or []) if g not in confirming]
+        if erased and clicked:
+            regressive = {k: list(v) for k, v in (state.get("regressive_gates") or {}).items()}
+            for identity in clicked:
+                if identity not in regressive.setdefault(old_sig, []):
+                    regressive[old_sig].append(identity)
+            print(f"  -> [Entry Erased] Pressing '{clicked[-1]}' emptied {erased} — that control will not be "
+                  f"pressed on this screen again.")
+            return {
+                "status": "perceiving",
+                "regressive_gates": regressive,
+                "control_state": run_pw(compute_control_state_fingerprint, active_page),
+                "retries": 0
+            }
+
+        # A gate pressed without the screen changing has not (yet) moved the application on, so it is
+        # remembered as tried for this screen and derive_actions offers the next candidate instead.
+        # This is what walks a screen needing several presses in sequence, and what stops a control
+        # that merely regenerates its own content (a captcha "Refresh") from being pressed forever.
+        pressed = {k: list(v) for k, v in (state.get("pressed_gates") or {}).items()}
+        for identity in state.get("clicked_gates") or []:
+            if identity not in pressed.setdefault(old_sig, []):
+                pressed[old_sig].append(identity)
+                print(f"  -> [Gate Tried] '{identity}' changed nothing on this screen; the next control gets its turn.")
+
+        new_control_state = run_pw(compute_control_state_fingerprint, active_page)
+        in_place_progress = state.get("in_place_progress", 0)
+        if new_control_state != state.get("control_state", "") and in_place_progress < MAX_IN_PLACE_PROGRESS:
+            print(f"  -> [In-Place Progress] Screen unchanged but the form's own state did "
+                  f"({in_place_progress + 1}/{MAX_IN_PLACE_PROGRESS}). Continuing without counting a retry.")
+            return {
+                "status": "perceiving",
+                "control_state": new_control_state,
+                "pressed_gates": pressed,
+                "in_place_progress": in_place_progress + 1,
+                "retries": 0
+            }
+
         retries = state.get("retries", 0)
         print(f"  [WARN: Signature Unchanged] Page did not advance. Possible validation error. Retry count: {retries + 1}/3")
         return {
             "status": "retry_or_abort",
+            "pressed_gates": pressed,
             "retries": retries + 1
         }
 
@@ -320,7 +578,10 @@ def hitl_intercept_node(state: AutomationState) -> AutomationState:
     print(f"  [HITL Input Received] Citizen replied: '{hitl_input}'")
 
     # *** FIX 6d: Write clarified PII data back into `user_vault` ***
-    if unresolved_fields and len(unresolved_fields) == 1:
+    # One question is asked per pause (llm_planner returns the fields in ask-order), so the citizen's
+    # reply belongs to the first entry. Mirrors core_inference/graph.py's resume-path write-back,
+    # including its preference for the element's DOM `name` over its prose label as the vault key.
+    if unresolved_fields:
         field_name = unresolved_fields[0].get("name") or unresolved_fields[0].get("label", "").lower()
         if field_name:
             # Upsert into in-memory vault so Stage 1 matches it immediately
@@ -408,6 +669,7 @@ def route_after_plan(state: AutomationState) -> str:
         "executing": "execute_node",
         "hitl_clarify": "hitl_intercept",
         "check": "check_status_node",
+        "final_confirmation": "final_confirmation",
         "error": "error_end"
     }.get(status, "error_end")
 
@@ -538,6 +800,8 @@ if __name__ == "__main__":
         },
         "document_vault": {},
         "history_signatures": [],
+        "regressive_gates": {},
+        "pressed_gates": {},
         "retries": 0,
         "screenshots_dir": "screenshots"
     }

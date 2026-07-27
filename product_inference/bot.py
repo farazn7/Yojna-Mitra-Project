@@ -455,8 +455,16 @@ async def on_message(message):
             auto_session_id = graph_output.get("automation_session_id", f"auto_{user_id}")
             
             discord_file = None
-            if automation_status in ("hitl_paused", "awaiting_confirm"):
-                shot_name = f"{auto_session_id}_final_review.png" if automation_status == "awaiting_confirm" else f"{auto_session_id}_otp_intercept.png"
+            # A completed submission has its own screenshot — what the portal showed after the final
+            # press, including any acknowledgement number. It is the one record the citizen most needs
+            # to keep, and it was previously never sent: "complete" was not among the statuses checked.
+            shot_by_status = {
+                "awaiting_confirm": f"{auto_session_id}_final_review.png",
+                "complete": f"{auto_session_id}_submitted.png",
+                "hitl_paused": f"{auto_session_id}_otp_intercept.png",
+            }
+            if automation_status in shot_by_status:
+                shot_name = shot_by_status[automation_status]
                 shot_path = os.path.join("screenshots", shot_name)
                 if os.path.exists(shot_path):
                     try:
