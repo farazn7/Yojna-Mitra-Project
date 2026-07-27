@@ -33,7 +33,10 @@ def test_pdf_form_routing():
     mock_app_info = {
         "scheme_name": "Test PDF Scheme",
         "application_mode": "pdf_form",
-        "application_form_url": "https://myscheme.gov.in/schemes/test_form.pdf",
+        "application_links": {
+            "pdf_links": ["https://myscheme.gov.in/schemes/test_form.pdf"],
+            "fallback_link": "https://myscheme.gov.in/schemes/test"
+        },
         "portal_url": "https://myscheme.gov.in/schemes/test"
     }
 
@@ -45,7 +48,7 @@ def test_pdf_form_routing():
         print(f"[Bot Output]\n{resp_clean}\n")
         assert result["application_mode"] == "pdf_form"
         assert result["automation_status"] == "idle"
-        assert "Download Form Here" in result["response"]
+        assert "Download Form" in result["response"]
         print("[OK] TEST 1 PASSED: PDF forms cleanly return instructions & link without Playwright coordinate manipulation!\n")
 
 

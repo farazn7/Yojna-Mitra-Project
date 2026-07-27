@@ -610,6 +610,23 @@ def launch_automation(state: ConversationState) -> dict:
 
 
     # 5. Mode is ONLINE → Launch ReAct Automation Graph!
+    if mode != "online":
+        # Safety guard: never fall through into live browser automation for a scheme that
+        # wasn't explicitly classified "online" (e.g. `pdf_form` with an empty `pdf_links`
+        # list from missing/legacy `application_links` data — automation must not run in that gap).
+        ref_link = fallback_link or portal_url
+        return {
+            "application_mode": mode,
+            "application_form_url": ref_link,
+            "automation_status": "idle",
+            "response": (
+                f"🏛️ **How to Apply: {target_scheme}**\n\n"
+                f"I couldn't find a ready-to-use automated application path for this scheme (mode: `{mode}`)."
+                + (f"\n\n📎 **Official Scheme Page:** [View Details]({ref_link})" if ref_link else "")
+                + "\n\n📍 Please visit your nearest **e-Sevai Kendra**, **Taluk Office**, or the relevant departmental office for assistance."
+            )
+        }
+
     target_url = online_link or portal_url
     if not target_url:
         return {
@@ -631,7 +648,7 @@ def launch_automation(state: ConversationState) -> dict:
         "user_vault": merged_vault,
         "actions_to_execute": [],
         "unresolved_questions": [],
-        "history": []
+        "history_signatures": []
     }
 
     try:
@@ -639,7 +656,7 @@ def launch_automation(state: ConversationState) -> dict:
         new_status = auto_result.get("status", "error")
         questions = auto_result.get("unresolved_questions", [])
 
-        if new_status == "hitl_intercept":
+        if new_status == "hitl_paused":
             q_text = "\n".join(questions) if questions else "Verification required on the portal."
             return {
                 "automation_status": "hitl_paused",
@@ -736,7 +753,7 @@ def handle_automation_response(state: ConversationState) -> dict:
             new_status = auto_result.get("status", "error")
             questions = auto_result.get("unresolved_questions", [])
 
-            if new_status == "hitl_intercept":
+            if new_status == "hitl_paused":
                 q_text = "\n".join(questions) if questions else "Further verification required."
                 return {"automation_status": "hitl_paused", "response": f"[Portal Intercept] **Verification Update**\n\n{q_text}"}
             elif new_status == "awaiting_final_confirmation":
