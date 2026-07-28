@@ -29,6 +29,7 @@ Key Features & Architectural Fixes:
 
 import os
 import hashlib
+import time
 import concurrent.futures
 from typing import Optional, Callable, Any
 from playwright.sync_api import sync_playwright, BrowserContext, Page, Dialog, Error as PlaywrightError
@@ -43,6 +44,37 @@ def run_pw(func, *args, **kwargs):
 
 # Global registry keeping active persistent sessions alive across graph turns
 _SESSION_REGISTRY: dict[str, dict[str, Any]] = {}
+
+def authorize_one_dialog(user_id: str, ttl_seconds: int = 20) -> bool:
+    """
+    Authorizes the NEXT native dialog this user's page raises to be accepted, once, within
+    `ttl_seconds`.
+
+    The dialog interceptor dismisses `confirm`/`alert`/`prompt` by default, which is right: a portal
+    must never be able to talk the agent into accepting something no human agreed to. But a portal
+    that asks "are you sure you want to submit?" after the citizen has already replied CONFIRM is
+    asking a question that has been answered — and dismissing it meant the submission the citizen
+    explicitly authorized silently never happened.
+
+    So authorization is narrow by construction: armed only by the code path that runs after a literal
+    CONFIRM, good for one dialog, expiring on a timer, and consumed the moment it is used. It cannot
+    be armed by anything the page does.
+    """
+    entry = _SESSION_REGISTRY.get(user_id)
+    if not entry:
+        return False
+    entry["dialog_authorized_until"] = time.time() + ttl_seconds
+    return True
+
+
+def _consume_dialog_authorization(user_id: str) -> bool:
+    """True if this user has an unexpired one-shot dialog authorization, which is spent by asking."""
+    entry = _SESSION_REGISTRY.get(user_id)
+    if not entry:
+        return False
+    until = entry.pop("dialog_authorized_until", 0)
+    return bool(until) and time.time() < until
+
 
 # Default callback for dialog notifications (can be overridden by bot.py for Discord relay)
 def _default_dialog_callback(user_id: str, dialog_type: str, message: str) -> tuple[str, Optional[str]]:
@@ -130,6 +162,12 @@ def launch_isolated_profile(
             dialog.accept()
             return
 
+        # A dialog the citizen has already authorized (see authorize_one_dialog) — spent on use.
+        if _consume_dialog_authorization(user_id):
+            print("  [Dialog] Accepting: the citizen authorized this submission with an explicit CONFIRM.")
+            dialog.accept()
+            return
+
         # Route all confirm, alert, and prompt dialogs through our registered HITL callback
         try:
             decision, prompt_text = _dialog_handler_callback(user_id, dialog.type, dialog.message)
@@ -195,17 +233,35 @@ def compute_page_signature(page: Page) -> str:
 
 def close_session(user_id: str):
     """Safely closes and removes the persistent context for `user_id`."""
+    global _PW_EXECUTOR
     if user_id in _SESSION_REGISTRY:
         entry = _SESSION_REGISTRY.pop(user_id)
+        # These are the same sync-API objects launch_isolated_profile created via run_pw on a
+        # worker thread — closing/stopping them directly from whatever thread called close_session()
+        # violates Playwright's thread-affinity requirement just like every other Playwright call in
+        # this file is already careful to avoid (see the module docstring / run_pw itself).
         try:
-            entry["context"].close()
+            run_pw(entry["context"].close)
         except Exception:
             pass
         try:
-            entry["playwright"].stop()
+            run_pw(entry["playwright"].stop)
         except Exception:
             pass
         print(f"[Browser Manager] Session closed for user: {user_id}")
+
+        # Once no sessions remain, recycle the shared worker pool so the next session's
+        # sync_playwright() always starts on a brand-new OS thread. Playwright's sync API expects a
+        # thread to host at most one Playwright instance for its whole life; ThreadPoolExecutor
+        # reusing a worker thread across separate launch/close cycles (this pool is shared process-
+        # wide, not per-session) left threads in a state that broke a later, unrelated session with
+        # "using Playwright Sync API inside the asyncio loop" — reproduced live after 2-3 sequential
+        # session cycles in one process. A long-running bot handling many users over time is exactly
+        # this pattern, just spread over longer, so this isn't just a test-script artifact.
+        if not _SESSION_REGISTRY:
+            old_executor = _PW_EXECUTOR
+            _PW_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="PW_Sync_Worker")
+            old_executor.shutdown(wait=False)
 
 
 def get_session_info(user_id: str) -> Optional[dict[str, Any]]:

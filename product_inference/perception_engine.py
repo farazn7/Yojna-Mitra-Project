@@ -28,6 +28,7 @@ Key Features & Architectural Fixes (Claude Sonnet & Master Plan Review):
 """
 
 import json
+import hashlib
 from typing import Any, Optional
 from playwright.sync_api import Page
 from product_inference.browser_manager import compute_page_signature
@@ -53,6 +54,15 @@ def perceive_dom_state(page: Page) -> dict[str, Any]:
     # and perform container-aware file input filtering
     js_extractor = """
     () => {
+        // *** Retire the previous pass's ids before assigning new ones ***
+        // Ids are positions in THIS pass's filtered list, and the filter drops elements that are now
+        // disabled or hidden. An element dropped from the list keeps whatever id it was given last
+        // time unless it is cleared here — so `[data-ym-id="1"]` matched both the current element #1
+        // and a stale one, and `locator.first` picked whichever came first in the document. Observed
+        // live: a click meant for the captcha's "Refresh" button resolved to the disabled OTP input
+        // left over from the previous pass and timed out for 30s, three times, aborting the run.
+        document.querySelectorAll('[data-ym-id]').forEach(el => el.removeAttribute('data-ym-id'));
+
         const selectors = 'input:not([type="hidden"]), select, textarea, button, [role="button"]';
         const elements = Array.from(document.querySelectorAll(selectors)).filter(el => {
             // Filter out explicitly disabled elements or elements marked hidden by HTML attributes
@@ -80,12 +90,20 @@ def perceive_dom_state(page: Page) -> dict[str, Any]:
             const id = idx + 1;
             el.setAttribute('data-ym-id', id.toString());
 
-            // Label resolution chain: aria-label -> placeholder -> label[for="id"] -> closest('label')
-            let label = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
+            // Label resolution chain: aria-label -> label[for="id"] -> placeholder -> closest('label')
+            //
+            // An authored <label for> outranks a placeholder: the label states what the field MEANS
+            // ("Enter Verification Code"), while a placeholder is a formatting hint about its SHAPE
+            // ("6-digit code"). Observed live — with the hint winning, the planner saw a field called
+            // "6-digit code" and repeatedly failed to connect it to the citizen's answer, re-asking
+            // for the same OTP every cycle. Placeholders remain the fallback for the many real
+            // portals that ship no <label> at all.
+            let label = el.getAttribute('aria-label') || '';
             if (!label && el.id) {
                 const lbl = document.querySelector('label[for="' + el.id + '"]');
                 if (lbl) label = lbl.innerText.trim();
             }
+            if (!label) label = el.getAttribute('placeholder') || '';
             // *** FIX: Wrapping-label fallback (`<label><input type="radio" value="obc"> OBC</label>`) ***
             if (!label) {
                 const wrappingLabel = el.closest('label');
@@ -103,8 +121,23 @@ def perceive_dom_state(page: Page) -> dict[str, Any]:
                 label: label,
                 value: el.value || '',
                 name: el.name || '',
-                required: el.required || false
+                required: el.required || false,
+                // A disabled control cannot be acted on at all — portals commonly keep "Proceed"
+                // disabled until the step's own checks pass. Perceiving this stops the agent from
+                // spending its retry budget pressing something the page is refusing to accept.
+                disabled: el.disabled === true
             };
+
+            // *** Report toggle STATE, not just the `value` artifact ***
+            // A checkbox's `el.value` is the browser default `"on"` whether or not it is ticked, so
+            // `value` alone tells the planner nothing about the control's state — and it is where an
+            // LLM's phantom `"on"` proposal comes from, since that is literally what perception said
+            // the element's value was. Whether a toggle is currently set is a plain DOM fact, so it
+            // is perceived directly; without it the agent cannot tell "not yet ticked" from "already
+            // ticked" and clicking it again silently toggles it back off.
+            if (el.type === 'checkbox' || el.type === 'radio') {
+                info.checked = el.checked;
+            }
 
             if (el.tagName.toLowerCase() === 'select') {
                 info.options = Array.from(el.options).map(o => ({
@@ -144,7 +177,11 @@ def perceive_dom_state(page: Page) -> dict[str, Any]:
             grouped[key]["options"].append({
                 "id": el["id"],
                 "text": el["label"],
-                "value": el["value"] or el["label"]
+                "value": el["value"] or el["label"],
+                # Per-option state, because the group's own `id` is only the FIRST option's id —
+                # a consumer that wants to know "is the citizen's choice already selected?" has to
+                # ask about the specific option, not the group.
+                "checked": el.get("checked", False)
             })
         else:
             singles.append(el)
@@ -156,14 +193,46 @@ def perceive_dom_state(page: Page) -> dict[str, Any]:
     json_str = json.dumps(collapsed_elements)
     approx_tokens = int(len(json_str) / 3.5)
 
+    # What the screen actually SAYS, not just what it offers to interact with. A review screen is
+    # characterised by showing the citizen back what they entered, and that summary lives in text, not
+    # in controls — so a question asked about the screen while being shown only its controls is a
+    # question about something that was never presented. Truncated: this feeds prompts, and the part
+    # that identifies a screen is at the top of it.
+    try:
+        page_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())[:1200]
+    except Exception:
+        page_text = ""
+
     return {
         "aria_tree_yaml": aria_tree_yaml,
+        "page_text": page_text,
         "elements_list": collapsed_elements,
         "page_signature": compute_page_signature(page),
         "total_raw_count": len(raw_elements),
         "total_collapsed_count": len(collapsed_elements),
-        "approx_token_count": approx_tokens
+        "approx_token_count": approx_tokens,
+        "control_state": compute_control_state_fingerprint(page)
     }
+
+
+def compute_control_state_fingerprint(page: Page) -> str:
+    """
+    Fingerprint of what every tagged control currently HOLDS (value / checked / disabled), as opposed
+    to `compute_page_signature`, which fingerprints which SCREEN is showing.
+
+    Both are needed because progress is not always a screen change. A step that verifies an OTP, a
+    captcha and a consent box in place changes none of URL/title/heading, so a loop that measures
+    progress only by screen signature reads three successful actions as three failed retries and
+    aborts. This is a plain DOM reading, so it works on any portal without knowing anything about it.
+    Must be called after the element tagger has run — it reads the `data-ym-id` attributes it sets.
+    """
+    try:
+        raw = page.evaluate("""() => Array.from(document.querySelectorAll('[data-ym-id]')).map(el => [
+            el.getAttribute('data-ym-id'), el.value || '', el.checked === true, el.disabled === true
+        ].join('~')).join('|')""")
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return "unknown_control_state"
 
 
 # ==============================================================================

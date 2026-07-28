@@ -37,3 +37,5 @@ docs/
 
 # Voice bot scratch audio/transcripts
 temp_voice/
+
+testing_n_diagnostics/check_*
