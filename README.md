@@ -114,7 +114,7 @@ Playwright-driven autonomous form filler that navigates government portals witho
   - `physical_only` / `unknown` → Returns nearest office location and manual instructions.
 - **Perception Engine (`perception_engine.py`):** Captures DOM element snapshots and page signatures to detect page state changes between automation steps.
 - **Dual-Stage LLM Planner (`llm_planner.py`):** VLM perceives current page state, matches form fields to PII Vault data, and outputs structured actions (type, click, select, upload).
-- **ReAct State Machine (`automation_graph.py`):** LangGraph graph iterating `perceive_node` → `plan_node` → `act_node` cycles until the form is complete.
+- **ReAct State Machine (`automation_graph.py`):** LangGraph subgraph iterating `perceive_node` → `plan_node` → `execute_node` → `check_status_node` until the form is complete or a human is needed.
 - **Zero Auto-Submit Safety Gate:** Hard halt before final submission. Takes a full-page screenshot, sends it to the user, and requires explicit text confirmation before submitting.
 
 ---
@@ -147,7 +147,25 @@ The original persona sweep (`test_hybrid_rag.py`) only asserted the pipeline ret
 - **Three Live Data Bugs Found:** Verified the pipeline's actual SQL filter against production data and surfaced a mis-scoped age boundary, a gender-neutral scheme mislabeled women-only, and a duplicate ingestion row — documented in `scheme_eval_labels.json`'s `known_issues_surfaced`, not silently worked around.
 - **Result:** 24/25 assertions passed; the one failure (`p10_senior_citizen_bpl` at `top_k=3`) is a genuine retrieval-ranking signal — the correct scheme ranks 9th and only surfaces at `top_k=10`.
 
-See `testing_n_diagnostics/README.md` for full methodology and results.
+See `testing_n_diagnostics/eval_scheme_recommendation.md` for full methodology and results.
+
+---
+
+### Phase 12 — Mock Portal, End-to-End Automation Eval & Loop Hardening
+
+Phase 8 built the ReAct loop; this phase was the first time it was driven end to end against a **real running web app**, and running it was itself the finding — several code paths had provably never executed successfully.
+
+**`mock_govt_portal/` (React + Vite):** a 4-step wizard built as a realistic adversary, not a friendly fixture — a genuinely async State→District cascade, a hidden file input behind a styled label, a generated CAPTCHA with its own Refresh button, controls that stay disabled until their field is filled, and a Submit wired to a native `window.confirm()`.
+
+**Result:** a single unattended run now completes Steps 1–4, halts at the review gate, and files the application on `CONFIRM` — with the portal's own acknowledgement asserted rather than inferred from the click. The only human inputs are answers to questions the agent asks (the CAPTCHA it cannot read, the OTP it cannot receive, two consents) plus the literal word `CONFIRM`.
+
+- **Zero Auto-Submit, now three independent layers:** the planner **refuses the press before it executes** (detection that runs after an irreversible action is not a safeguard — the original check ran post-click); the graph still requires a literal `CONFIRM`; and the dialog interceptor accepts a native confirm only under a one-shot, expiring authorization armed exclusively by the CONFIRM code path. Nothing the page does can arm it.
+- **Every English keyword list removed from the automation path.** Four existed; two of them decided *when the run halts for CONFIRM* and *when the citizen is told their application was filed*, so a Hindi or Tamil portal would have sailed past its own review screen. Replaced with semantic judgments (`is_final_review_screen`, `page_confirms_submission`) covered in English, Hindi and Tamil.
+- **Observation-based loop rules** — direction from visit order, destruction from erasure, effectiveness from aftermath, and binding from responsiveness. None keys on wording; each is learned at runtime from what the browser actually did. They survive HITL pauses via `automation_page_memory`, since every resume is a fresh subgraph invocation.
+- **Deterministic action derivation:** the planner's second LLM call — whose only job was mapping Stage 1's output to Playwright verbs, a lookup with exactly one correct answer — was deleted. Four "override the model in Python" patches ceased to exist rather than being kept, including an English `("back", "cancel", "previous")` list on a product serving citizens who may see **"पीछे"**. Planner latency roughly halved.
+- **Anti-hallucination provenance check:** a proposed value must be backed by a real vault key. The model correctly inferred *"Chennai is in Tamil Nadu"* and the check rejected it anyway, because no vault key backed it. On a form that becomes a legal government application, a plausible guess is not good enough. It also never ticks "I'm not a robot" — **nothing in this codebase attempts to solve a CAPTCHA**, by design.
+
+See `testing_n_diagnostics/eval_web_automation.md` for the full walkthrough, the defect table, and the design rule the eval enforces.
 
 ---
 
@@ -193,12 +211,21 @@ Yojna-Mitra-Project/
 │   ├── extract_schema_llm.py       # LLM-based schema field extractor
 │   └── schemes.json                # Raw scraped scheme data (230+ schemes)
 │
+├── mock_govt_portal/               # React + Vite 4-step wizard — the automation eval's target
+│   ├── src/
+│   │   ├── App.jsx                 # Wizard shell + shared form state
+│   │   └── steps/                  # Personal details, document upload, OTP/CAPTCHA, review & submit
+│   ├── index.html
+│   └── package.json                # `npm run dev` → http://localhost:5173
+│
 ├── testing_n_diagnostics/
 │   ├── test_scheme_recommendation_matching.py   # Ground-truth retrieval eval — asserts on schemes_fetched
 │   ├── scheme_eval_labels.json     # Labeled dataset — 10 positive cases + 5 hard negatives
 │   ├── test_hybrid_rag.py          # Qualitative persona sweep (10 personas) — LLM tone/quality, not correctness
-│   ├── test_phase7_flow.py         # Phase 7 HITL flow tests
-│   ├── README.md                   # Eval methodology, results, and known issues surfaced
+│   ├── test_web_automation_react_loop.py        # Web automation eval — drives the real mock portal
+│   ├── eval_scheme_recommendation.md            # Retrieval eval methodology, results, known issues surfaced
+│   ├── eval_web_automation.md                   # Automation eval walkthrough, defect table, design rule
+│   ├── check_*.py                  # Local-only diagnostics (gitignored) — see eval_web_automation.md
 │   └── personas/                   # Citizen persona JSON definitions
 │
 ├── configuration/
@@ -293,6 +320,22 @@ pytest testing_n_diagnostics/test_hybrid_rag.py -v -s
 ```bash
 python -m product_inference.test_integration
 ```
+
+### 9. Run the Web Automation Eval (live, slow)
+
+Needs the mock portal and Ollama running first:
+
+```bash
+cd mock_govt_portal && npm install && npm run dev   # serves http://localhost:5173
+```
+
+Then, from the project root:
+
+```bash
+pytest testing_n_diagnostics/test_web_automation_react_loop.py -v -s
+```
+
+A real Chrome window opens and you can watch the agent work. Each planner cycle is a real local LLM call (~15–20s), so a full pass takes upwards of half an hour — same scoping as the RAG eval, not for a fast CI loop.
 
 ---
 
