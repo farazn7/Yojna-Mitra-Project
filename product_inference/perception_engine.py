@@ -193,8 +193,19 @@ def perceive_dom_state(page: Page) -> dict[str, Any]:
     json_str = json.dumps(collapsed_elements)
     approx_tokens = int(len(json_str) / 3.5)
 
+    # What the screen actually SAYS, not just what it offers to interact with. A review screen is
+    # characterised by showing the citizen back what they entered, and that summary lives in text, not
+    # in controls — so a question asked about the screen while being shown only its controls is a
+    # question about something that was never presented. Truncated: this feeds prompts, and the part
+    # that identifies a screen is at the top of it.
+    try:
+        page_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())[:1200]
+    except Exception:
+        page_text = ""
+
     return {
         "aria_tree_yaml": aria_tree_yaml,
+        "page_text": page_text,
         "elements_list": collapsed_elements,
         "page_signature": compute_page_signature(page),
         "total_raw_count": len(raw_elements),

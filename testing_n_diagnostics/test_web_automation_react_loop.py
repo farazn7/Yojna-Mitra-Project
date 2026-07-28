@@ -3,7 +3,7 @@ Eval: Web Automation ReAct Loop (`.claude/specs/eval-02-web-automation-react-loo
 
 Drives `automation_graph.py`'s ReAct loop (perceive -> plan -> execute -> check) against the
 REAL `mock_govt_portal/` dev server (feature-01) instead of an inline `page.set_content()`
-string, so the cascading-dropdown re-perceive branch, the OTP/Captcha keyword gate, and
+string, so the cascading-dropdown re-perceive branch, Stage 1's per-field HITL routing, and
 `browser_manager.py`'s native dialog interceptor are exercised against a genuine async DOM.
 
 *** LIVE / SLOW — NOT for a fast test loop or CI ***
@@ -354,7 +354,12 @@ def test_otp_intercept_and_resume(document_vault: dict):
     )
 
     if otp_turn:
-        print(f"  [OK] Reached OTP/Captcha HITL pause (turn '{otp_turn['turn']}'), matching automation_graph.py's existing keyword list.")
+        # The pause is raised by Stage 1 per element, with the element's identity attached. The
+        # English keyword gate this assertion originally described was deleted — it fired on any
+        # screen mentioning a code and asked a question no field owned, so the citizen's answer had
+        # nowhere to be written. The wording match below is the TEST reading the response text; the
+        # product decides nothing by keyword.
+        print(f"  [OK] Reached OTP/Captcha HITL pause (turn '{otp_turn['turn']}') via Stage 1's per-field routing.")
     else:
         print("  [LOG] Did not observe an explicit OTP-worded hitl_paused turn within max_turns — full turn history:")
         for turn in run["history"]:

@@ -369,6 +369,21 @@ def gate_identity(orig_el: dict[str, Any]) -> str:
     return f"{str(orig_el.get('name', '')).strip()}|{str(orig_el.get('label', '')).strip()}".lower()
 
 
+def is_pressable_element(orig_el: dict[str, Any]) -> bool:
+    """
+    Whether this perceived element can be pressed at all. A pure DOM reading — no wording, no
+    language, no LLM.
+
+    Shared rather than inlined so the graph's snapshot of "which controls this screen offered" and
+    the planner's own candidate filter can never disagree about what counts as a control. The two
+    are compared against each other (see `newly_available_gates`), and a disagreement would read as
+    a control appearing or vanishing when nothing on the page had changed.
+    """
+    tag = str(orig_el.get("tag", "")).lower()
+    el_type = str(orig_el.get("type", "")).lower()
+    return tag in ("button", "a") or el_type in ("submit", "button", "reset") or bool(orig_el.get("role") == "button")
+
+
 def _playwright_verb(orig_el: dict[str, Any]) -> str:
     """Maps a perceived element to its Playwright action verb. Pure lookup — never an LLM decision."""
     tag = str(orig_el.get("tag", "")).lower()
@@ -387,6 +402,7 @@ def derive_actions(
     el_by_id: dict[int, dict[str, Any]],
     regressive_gates: Optional[set[str]] = None,
     pressed_gates: Optional[set[str]] = None,
+    newly_available_gates: Optional[set[str]] = None,
 ) -> list[dict[str, Any]]:
     """
     Translates Stage 1's verified classification into an ordered Playwright action batch.
@@ -398,7 +414,9 @@ def derive_actions(
     upload it was supposed to follow, already-filled fields re-filled and destroying dependent
     cascading selects). Semantic judgment stays in Stage 1 where it belongs.
 
-    Ordering is fixed: fill/select/check -> upload -> at most one FORWARD navigation click.
+    Ordering is fixed: fill/select/check -> upload -> at most one FORWARD navigation click. Where
+    several gates remain eligible for that one click, `newly_available_gates` breaks the tie in
+    favour of a control the screen only started offering once something was entered — see below.
     """
     actions: list[dict[str, Any]] = []
 
@@ -493,9 +511,25 @@ def derive_actions(
             return False
         # Only a control that can be pressed at all. A text box is not a button whatever Stage 1 says
         # about it, and clicking one waits out Playwright's full 30s timeout for nothing.
-        tag = str(el.get("tag", "")).lower()
-        el_type = str(el.get("type", "")).lower()
-        return tag in ("button", "a") or el_type in ("submit", "button", "reset") or bool(el.get("role") == "button")
+        return is_pressable_element(el)
+
+    # A control that became available only once the citizen answered something is bound to that
+    # answer; a control that was on the screen from the very first look at it is not. That is the
+    # whole pairing signal — it reads neither the control's wording (a portal may be in any Indian
+    # language) nor its position in the document, both of which have already been tried and failed:
+    # on the mock's Step 3 the captcha's "Refresh" sits BETWEEN the two "Verify" buttons, so document
+    # order picks it the moment the first Verify has been tried, and pressing it throws away the code
+    # the citizen just typed.
+    #
+    # This is ordering and nothing else. Every gate reaching here has already survived `_pressable`,
+    # `regressive_gates`, `pressed_gates` and `regenerates_content`, so preferring one can never
+    # press something a filter excluded — the worst it can do is choose a different safe candidate.
+    fresh = newly_available_gates or set()
+
+    def _prefer_new(gates: list[ClassifiedField]) -> list[ClassifiedField]:
+        # `sorted` is stable and False sorts before True, so newly-available gates come first and
+        # document order still decides within each group. With no set supplied nothing moves at all.
+        return sorted(gates, key=lambda g: gate_identity(el_by_id.get(g.id, {})) not in fresh)
 
     # Phase 3a — confirm what we just entered, before anything that could leave the screen. A code box
     # with its own "Verify" beside it is only accepted once that control is pressed, and pressing it
@@ -507,11 +541,11 @@ def derive_actions(
     answered_ids = entered_ids | {
         el_id for el_id, el in el_by_id.items() if already_answered(el)
     }
-    commit_gates = [
+    commit_gates = _prefer_new([
         g for g in action_gates
         if g.commits_field_id is not None and _pressable(g)
         and g.commits_field_id in answered_ids
-    ]
+    ])
 
     if commit_gates:
         gate = commit_gates[0]
@@ -530,7 +564,9 @@ def derive_actions(
         })
         return actions
 
-    forward_gates = [g for g in action_gates if g.advances_form and g.commits_field_id is None and _pressable(g)]
+    forward_gates = _prefer_new(
+        [g for g in action_gates if g.advances_form and g.commits_field_id is None and _pressable(g)]
+    )
     if forward_gates:
         gate = forward_gates[0]
         actions.append({
@@ -550,6 +586,24 @@ def derive_actions(
 SUBMIT_IDENTIFIER_MODEL = "llama3.1:8b"
 
 
+def _awaits_information(orig_el: dict[str, Any]) -> bool:
+    """
+    Whether this element is still asking the citizen for information it does not have.
+
+    A control that transmits a value (text box, select, file input) and holds nothing is an unanswered
+    question, full stop — no reading of any language required. Buttons are excluded because they
+    carry no data, and toggles because a declaration or consent is part of submitting rather than
+    information being collected.
+    """
+    tag = str(orig_el.get("tag", "")).lower()
+    el_type = str(orig_el.get("type", "")).lower()
+    if tag in ("button", "a") or el_type in ("submit", "button", "reset"):
+        return False
+    if el_type in ("checkbox", "radio") or el_type.endswith("_group"):
+        return False
+    return not str(orig_el.get("value") or "").strip()
+
+
 class ScreenKind(BaseModel):
     reasoning: str = Field(description="What the screen is asking the citizen to do.")
     is_final_review: bool = Field(
@@ -567,6 +621,13 @@ def is_final_review_screen(perception: dict[str, Any], model: str = SUBMIT_IDENT
     Step 2 — which means it does not submit the form" on a screen that was only Step 1 of 4. The
     screen, in contrast, says plainly what stage the citizen is at: a step still asking for a name and
     a district is not a review of a finished application.
+
+    The screen's own TEXT is shown alongside its controls, because a review screen's defining feature
+    is that it reads the citizen's answers back to them — and a summary is text, not controls. Asked
+    with controls alone, the mock's OTP/captcha step was called the final review; with the screen's
+    text in front of it, correctly not. Withholding the evidence and then blaming the model for the
+    answer is the same mistake as asking "which of these submits": the question was underspecified,
+    not the reader.
     """
     elements = [
         {"label": el.get("label", ""), "tag": el.get("tag", ""), "type": el.get("type", ""),
@@ -576,7 +637,26 @@ def is_final_review_screen(perception: dict[str, Any], model: str = SUBMIT_IDENT
     if not elements:
         return False
 
-    prompt = f"""ELEMENTS ON THIS SCREEN:
+    # A screen still holding an empty field cannot be a review of a finished application. That is
+    # arithmetic on the DOM, not a reading of the page, so Python settles it and the model is never
+    # asked — which matters because the model is where the language dependency lives: asked about a
+    # terse Hindi Step 1 (पूरा नाम / राज्य / आगे बढ़ें, all empty) llama3.1 called it the final review,
+    # while getting the equivalent English screen right. Measured, and the error direction is the bad
+    # one: it would halt a half-filled application at the CONFIRM gate and ask the citizen to approve
+    # a form nobody had finished. The reverse mistake is cheap by comparison — the pre-press submit
+    # guard still refuses the button — so the deterministic filter is allowed to be blunt.
+    awaiting = [el for el in perception.get("elements_list", []) if _awaits_information(el)]
+    if awaiting:
+        print(f"[Planner] Not the final review: {len(awaiting)} field(s) on this screen are still empty "
+              f"(e.g. '{awaiting[0].get('label', awaiting[0].get('id'))}').")
+        return False
+
+    page_text = " ".join(str(perception.get("page_text") or "").split())[:1200]
+
+    prompt = f"""TEXT SHOWN ON THIS SCREEN:
+{page_text or "(no text could be read)"}
+
+ELEMENTS ON THIS SCREEN:
 {json.dumps(elements, indent=2, ensure_ascii=False)}
 
 Is this the FINAL REVIEW screen of a multi-step form — everything already entered, and the only thing
@@ -587,6 +667,8 @@ Rules:
 - A screen offering to save and continue to a further step is NOT the final review.
 - Agreeing to a declaration or consent is part of submitting, not information being collected — a
   screen whose only input is such an agreement can still be the final review.
+- A screen that reads previously entered answers BACK to the citizen, with no empty fields left to
+  fill, is a review of a finished application.
 - Judge by what the screen means, in whatever language it is written.
 """
     result = safe_ollama_call(model=model, messages=[{"role": "user", "content": prompt}], schema=ScreenKind)
@@ -598,47 +680,78 @@ class SubmissionOutcome(BaseModel):
     confirms_submission: bool = Field(description="True only if the page confirms the application has been submitted.")
 
 
-def page_confirms_submission(page_text: str, model: str = DEFAULT_PLANNER_MODEL) -> bool:
+def page_confirms_submission(page_text: str) -> bool:
     """
     Whether the page shown after the final press confirms the application was actually filed.
 
-    Reported to the citizen, so it must be true rather than optimistic: the press used to be announced
-    as "Application Submitted" unconditionally, which said an application had been filed when the
-    portal was still sitting on the review screen. Read from the page rather than matched against
-    English phrases like "acknowledgement number", which say nothing on a portal in Hindi or Tamil.
+    This is the sentence the citizen is told, so it must be true rather than optimistic: the press
+    used to be announced as "Application Submitted" unconditionally, which told someone an
+    application had been filed while the portal was still sitting on the review screen. Read from the
+    page rather than matched against English phrases like "acknowledgement number", which say nothing
+    on a portal in Hindi or Tamil.
+
+    Two things stop the reading being optimistic, both of them measured rather than assumed:
+
+    A form's own text CONTAINS its submit button's label, so a page still awaiting submission is full
+    of words meaning "submit the application" — and asked plainly, gemma3:4b called a Tamil review
+    screen ("விண்ணப்பத்தை சமர்ப்பிக்கவும்", the button) a confirmed submission. The prompt therefore
+    draws the distinction that actually separates the two states in any language: an invitation to act
+    is the form still waiting, whereas a confirmation reports something already done.
+
+    And both models must agree before the claim is made. The error directions are wildly unequal —
+    saying "filed" wrongly sends a citizen away believing their application is in, while saying
+    "no acknowledgement" wrongly costs them a glance at a screenshot and an offer to press again,
+    which is exactly what the caller does. So this is the mirror image of `press_finally_submits`:
+    there, either model's doubt is enough to refuse; here, either model's doubt is enough to withhold.
     """
     text = " ".join((page_text or "").split())[:1500]
     if not text:
         return False
     prompt = (
         "TEXT SHOWN ON THE PAGE AFTER PRESSING SUBMIT:\n" + text + "\n\n"
-        "Does this page confirm that the application HAS BEEN SUBMITTED (for example by acknowledging "
-        "receipt or showing a reference for it), or is it still showing the form awaiting submission?\n\n"
-        "Judge by meaning, in whatever language the page is written."
+        "Does this page report that the application HAS ALREADY BEEN SUBMITTED, or is it still the "
+        "form, waiting to be submitted?\n\n"
+        "Rules:\n"
+        "- A button, link or instruction INVITING the citizen to submit is not a confirmation. A form "
+        "still waiting to be submitted naturally contains the words of its own submit button.\n"
+        "- Judge by meaning, in whatever language the page is written.\n"
+        "- A confirmation reports a COMPLETED act: it acknowledges receipt, or gives a reference or "
+        "acknowledgement number for an application that now exists. If the page does that, it is "
+        "confirmed, whatever else is written on it.\n"
     )
-    result = safe_ollama_call(model=model, messages=[{"role": "user", "content": prompt}], schema=SubmissionOutcome)
-    return bool(result and result.confirms_submission)
+    for model in (DEFAULT_PLANNER_MODEL, SUBMIT_IDENTIFIER_MODEL):
+        result = safe_ollama_call(model=model, messages=[{"role": "user", "content": prompt}], schema=SubmissionOutcome)
+        if not (result and result.confirms_submission):
+            if result:
+                print(f"[Planner] {model} does not read this page as a completed submission: {result.reasoning}")
+            return False
+    return True
 
 
 class PressConsequence(BaseModel):
+    # Field order is deliberate: the model fills JSON keys in order, so stating the reason first makes
+    # the verdict the conclusion of a thought rather than a guess made before thinking.
     reasoning: str = Field(description="What pressing this control does.")
     finally_submits: bool = Field(description="True only if pressing it finally submits the whole application.")
 
 
-def press_finally_submits(control_label: str, other_labels: list[str]) -> bool:
+def _finally_submits_votes(control_label: str, other_labels: list[str]) -> list[bool]:
     """
-    Whether pressing this one control would finally submit the application.
+    Each local model's yes/no on whether pressing this one control would finally submit the
+    application. Returned unaggregated, because the two callers face opposite error asymmetries and
+    have to combine the same votes differently — see `press_finally_submits` (refuse a press) and
+    `identify_submit_control` (choose a press).
 
-    Asked per control, not as "which of these submits", because the latter forces a choice and got
+    Asked per control, never as "which of these submits": the latter forces a choice and got
     "Save & Proceed to Step 2 — which means it does not submit the form" returned as the submission on
     Step 1 of 4, halting a run three steps early. A yes/no about a single control lets the honest
-    answer be "no", which is the answer for nearly every control the loop ever presses.
+    answer be "no", which is the answer for nearly every control on nearly every screen.
 
-    Both local models are asked and either one is enough to refuse. The two error directions are not
-    equal: refusing wrongly costs a pause the citizen can release with CONFIRM, while agreeing wrongly
-    files a government application nobody authorized. Measured on submit controls in English, Hindi
-    and Tamil and on save/verify/refresh/back controls, the two together caught every submission and
-    neither refused an ordinary one.
+    Context is deliberately the OTHER CONTROLS only, never the screen's field labels. Handing the
+    model the fields too ("Full Name", "Resident State") made it read "Save & Proceed to Step 2" as
+    the final submission — a screen full of empty fields apparently looks like something being filed.
+    There is no preamble about government applications either: with that context llama3.1 answered
+    "none" on screens carrying an unmistakable submit button, in every language tried.
     """
     prompt = (
         f'CONTROL ABOUT TO BE PRESSED: "{control_label}"\n'
@@ -651,30 +764,36 @@ def press_finally_submits(control_label: str, other_labels: list[str]) -> bool:
         "- Saving and continuing to a further step is NOT the final submission.\n"
         "- Verifying a code is NOT the final submission.\n"
     )
+    votes: list[bool] = []
     for model in (DEFAULT_PLANNER_MODEL, SUBMIT_IDENTIFIER_MODEL):
         result = safe_ollama_call(model=model, messages=[{"role": "user", "content": prompt}], schema=PressConsequence)
         if result and result.finally_submits:
             print(f"[Planner] '{control_label}' reads as the final submission to {model}: {result.reasoning}")
-            return True
-    return False
+        # A model that failed to answer at all votes no. What that costs is the caller's aggregation
+        # to decide: a missing opinion can neither arm a refusal nor complete the agreement a press
+        # requires, which is the safe direction in both cases.
+        votes.append(bool(result and result.finally_submits))
+    return votes
 
 
-class SubmitControlChoice(BaseModel):
-    # Field order is deliberate: the model fills JSON keys in order, so stating the reason first makes
-    # the id the conclusion of a thought rather than a guess made before thinking. And the id is a
-    # REQUIRED int with 0 meaning "none here" — with an Optional[int], llama3.1 reasoned its way to the
-    # right control and then returned null anyway, on every case tried.
-    reasoning: str = Field(description="Why that control is (or why no control is) the final submission.")
-    element_id: int = Field(description="element_id of the control that finally submits the form; 0 if no control here does.")
+def press_finally_submits(control_label: str, other_labels: list[str]) -> bool:
+    """
+    Whether the loop must refuse to press this control of its own accord.
+
+    Either model saying yes is enough to refuse. The two error directions are not equal: refusing
+    wrongly costs a pause the citizen can release with CONFIRM, while agreeing wrongly files a
+    government application nobody authorized. Measured on submit controls in English, Hindi and Tamil
+    and on save/verify/refresh/back controls, the two together caught every submission and neither
+    refused an ordinary one.
+    """
+    return any(_finally_submits_votes(control_label, other_labels))
 
 
-# (model constant defined above)
-# The final submission is identified by the strongest local model available, not the small vision
-# model that classifies ordinary fields. It is one call per application — the rarest decision in the
-# flow and by far the most consequential — and the 4B model was observed picking the "Back" button on
-# a Tamil review screen, which would be a wrong irreversible click. Cost is irrelevant at this
-# frequency; being right is not.
-def identify_submit_control(perception: dict[str, Any], model: str = SUBMIT_IDENTIFIER_MODEL) -> Optional[int]:
+# Both local models are consulted rather than the small vision model alone. This is one reading per
+# application — the rarest decision in the flow and by far the most consequential — and the 4B model
+# was observed picking the "Back" button on a Tamil review screen, which would be a wrong irreversible
+# click. Cost is irrelevant at this frequency; being right is not.
+def identify_submit_control(perception: dict[str, Any]) -> Optional[int]:
     """
     Identifies the control that finally submits the application on the review screen.
 
@@ -683,6 +802,17 @@ def identify_submit_control(perception: dict[str, Any], model: str = SUBMIT_IDEN
     a reading of the screen, which is why it is asked of the model rather than matched against English
     button text: `has-text('Submit')` finds nothing on a portal that says "जमा करें", and a wrong match
     would press the wrong button on the most consequential click in the whole flow.
+
+    Every pressable control goes through the same per-control yes/no the pre-press guard uses, and the
+    votes are combined the opposite way round. Refusing to press asks "does EITHER reading think this
+    submits?"; choosing what to press asks "do BOTH readings agree this one does?", and then requires
+    that exactly one control on the screen cleared that bar. Two controls both reading as the
+    submission is not a tie to be broken — it is the screen being genuinely ambiguous about the single
+    irreversible act, and the honest response is to press nothing and say so.
+
+    This deliberately replaces a "which ONE of these submits?" prompt, which forces a choice so
+    something always gets named: it once returned "Save & Proceed to Step 2" as the submission with
+    its own reasoning reading "which means it does not submit the form".
 
     Returns None when nothing on the screen qualifies, which the caller must treat as "do not click".
     """
@@ -699,55 +829,29 @@ def identify_submit_control(perception: dict[str, Any], model: str = SUBMIT_IDEN
     if not pressable:
         return None
 
-    # Presented under the key the answer must use. With perception's own `id` key, the model reasoned
-    # correctly about which control was the submission and then returned element_id null — it had no
-    # `element_id` in front of it to answer with.
-    choices = [
-        {"element_id": el["id"], "label": el.get("label", ""), "tag": el.get("tag", ""), "type": el.get("type", "")}
-        for el in pressable
-    ]
+    # Context for each question is the OTHER pressable controls only — never the screen's fields.
+    # See _finally_submits_votes: field labels in context made a "Proceed" button read as a filing.
+    candidates: list[dict[str, Any]] = []
+    for el in pressable:
+        label = str(el.get("label", "")).strip()
+        if not label:
+            # A control with no readable name cannot be judged by meaning, and guessing at the one
+            # press that cannot be undone is exactly what this function exists to avoid.
+            continue
+        others = [str(o.get("label", "")) for o in pressable if o["id"] != el["id"]]
+        if all(_finally_submits_votes(label, others)):
+            candidates.append(el)
 
-    # Deliberately free of preamble about government applications and final submissions: with that
-    # context llama3.1 answered "none" on screens with an unmistakable submit button, in every
-    # language tried. The controls and the question are enough, and this call is only ever reached
-    # once the citizen has already authorized the submission.
-    prompt = f"""PRESSABLE CONTROLS:
-{json.dumps(choices, indent=2, ensure_ascii=False)}
-
-Which ONE control performs the final submission of the form?
-
-Rules:
-- Judge by what each control MEANS, in whatever language it is written. Do not rely on any particular word.
-- A control that goes back, cancels, resets, re-issues content or edits a section is NOT the submission.
-- Answer 0 if no control here submits the form. Never guess.
-"""
-    # Asked twice and required to agree. An irreversible click is the one place where an uncertain
-    # model must produce no action at all rather than its best guess, and disagreement between two
-    # runs is the cheapest available signal that the screen is genuinely ambiguous.
-    answers = []
-    for _ in range(2):
-        result = safe_ollama_call(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            schema=SubmitControlChoice
-        )
-        answers.append(result.element_id if result else None)
-
-    if answers[0] != answers[1]:
-        print(f"[Planner] Two readings of the review screen disagreed ({answers}) — not pressing anything.")
-        return None
-    if not answers[0]:
+    if not candidates:
         print("[Planner] No control on this screen was identified as the final submission.")
         return None
-    result = SubmitControlChoice(element_id=answers[0], reasoning=(result.reasoning if result else ""))
-
-    # The model may only choose from what is actually pressable on this screen.
-    if result.element_id not in {el["id"] for el in pressable}:
-        print(f"[Planner] Submission control #{result.element_id} is not a pressable control on this screen — ignoring.")
+    if len(candidates) > 1:
+        print(f"[Planner] {len(candidates)} controls on this screen each read as the final submission "
+              f"({[str(c.get('label', '')) for c in candidates]}) — not pressing anything.")
         return None
 
-    print(f"[Planner] Final submission control identified: #{result.element_id} ({result.reasoning})")
-    return result.element_id
+    print(f"[Planner] Final submission control identified: #{candidates[0]['id']} ('{candidates[0].get('label', '')}')")
+    return candidates[0]["id"]
 
 
 # ==============================================================================
@@ -760,7 +864,8 @@ def plan_wizard_step(
     document_vault: dict[str, str],
     model: str = DEFAULT_PLANNER_MODEL,
     regressive_gates: Optional[set[str]] = None,
-    pressed_gates: Optional[set[str]] = None
+    pressed_gates: Optional[set[str]] = None,
+    newly_available_gates: Optional[set[str]] = None
 ) -> dict[str, Any]:
     """
     Orchestrates Stage 1 (Classification) + Stage 2 (Action Execution Generation).
@@ -988,6 +1093,14 @@ CRITICAL RULES:
             dumped["type"] = perceived.get("type", "")
             unresolved_payload.append(dumped)
 
+        # Ask in the order the citizen reads the screen. `unresolved_fields` arrives in whatever order
+        # Stage 1 happened to emit its classifications, which is a 4B model's whim: on the mock's Step 3
+        # it asked for the "I'm not a robot" tick between the OTP and the captcha, though the tick sits
+        # below both on the page. Perception numbers elements top to bottom, so sorting by id restores
+        # the form's own order. This is presentation, not judgment — which is why document position is
+        # the right thing to use here and the wrong thing to use when deciding what to press.
+        unresolved_payload.sort(key=lambda d: d.get("id", 0))
+
         # Ask about exactly ONE field per turn. The citizen answers with a single message, so
         # attributing that message to the right field is what makes the vault write-back correct —
         # and asking two questions at once makes the attribution a guess. Each field now carries its
@@ -1017,7 +1130,8 @@ CRITICAL RULES:
     # Asking a model to redo that mapping added latency and a whole class of failures (wrong verb
     # on file inputs, navigation clicks ordered before the work they depend on, already-filled
     # fields re-filled and wiping dependent cascading selects) without adding any information.
-    validated_actions = derive_actions(confident_fields, file_uploads, action_gates, el_by_id, regressive_gates, pressed_gates)
+    validated_actions = derive_actions(confident_fields, file_uploads, action_gates, el_by_id,
+                                       regressive_gates, pressed_gates, newly_available_gates)
 
     return {
         "status": "actions_ready" if validated_actions else "perceiving",

@@ -78,7 +78,7 @@ class ConversationState(TypedDict):
     document_vault: dict                     # doc_type -> verified file path, forwarded to AutomationState for FILE_UPLOAD classification
     automation_unresolved_fields: list       # Unresolved field metadata carried from a paused turn into the next resume turn
     automation_ask_counts: dict              # field identity -> times the portal has re-asked it after the citizen answered (loop bound)
-    automation_page_memory: dict             # screens visited + navigation controls observed to move backwards; survives HITL resumes
+    automation_page_memory: dict             # screens visited, controls observed to move backwards, and what each screen offered on arrival; survives HITL resumes
     automation_hitl_answers: dict            # every answer the citizen has given this automation run, accumulated
 
 # ==========================================
@@ -719,7 +719,8 @@ def launch_automation(state: ConversationState) -> dict:
         "actions_to_execute": [],
         "unresolved_questions": [],
         "history_signatures": [],
-        "regressive_gates": {}
+        "regressive_gates": {},
+        "initial_gates": {}
     }
 
     try:
@@ -876,12 +877,20 @@ def _page_memory(auto_result: dict) -> dict:
     What the automation subgraph learned about the portal's own navigation, lifted out so it can
     survive a HITL pause. Each resume is a fresh subgraph invocation, so anything the ReAct loop
     observed — which screens it has already stood on, which navigation control on which screen
-    turned out to move backwards — is lost unless ConversationState carries it across the pause.
+    turned out to move backwards, which controls a screen offered before anything was entered — is
+    lost unless ConversationState carries it across the pause.
+
+    `initial_gates` matters most of all here, and specifically because of this pause: the citizen's
+    answer is written into the DOM by `_inject_hitl_answer` below, which is what unlocks the field's
+    own confirm control. Losing the snapshot would make that control look like it had been there all
+    along on the very cycle that has to prefer it — leaving the planner to pick by document order and
+    press a captcha "Refresh" that discards the answer just given.
     """
     return {
         "history_signatures": list(auto_result.get("history_signatures") or []),
         "regressive_gates": {k: list(v) for k, v in (auto_result.get("regressive_gates") or {}).items()},
         "pressed_gates": {k: list(v) for k, v in (auto_result.get("pressed_gates") or {}).items()},
+        "initial_gates": {k: list(v) for k, v in (auto_result.get("initial_gates") or {}).items()},
     }
 
 

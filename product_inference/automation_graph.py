@@ -15,11 +15,19 @@ Key Features & Architectural Fixes (Claude Sonnet & Master Plan Review):
      after every action; any change means the rest of the batch is reasoning about a page that
      no longer exists, so it breaks out to `perceive_node` for a fresh plan. Covers dependent
      fields mounting (State → District), step transitions, and controls revealed by an upload.
-  3. HITL Clarify & OTP/Captcha Intercept Gates:
-     If `llm_planner` returns `hitl_clarify` OR if `execute_node` detects OTP/Captcha
-     keywords/inputs on the live DOM, immediately halts the graph (`status: hitl_intercept`).
-     Captures a screenshot (`screenshots/{session_id}_intercept.png`) and waits for
-     the citizen's Discord reply.
+  3. HITL Clarify Gate:
+     When `llm_planner` cannot resolve a field from the citizen's vault it returns `hitl_clarify`,
+     naming the exact element that needs an answer, and the graph halts (`status: hitl_paused`) with
+     a screenshot of the screen being asked about (`screenshots/{session_id}_otp_intercept.png`) so
+     a challenge the citizen has to read — a captcha — is actually visible to them.
+
+     There is deliberately no separate keyword scan for OTP/captcha screens. One existed, matching
+     English phrases in the page HTML, and it was a strictly worse duplicate of this gate: it fired
+     on any screen that merely mentioned a code, cut the action batch short, and asked a question
+     attached to no element — so the citizen's answer had nowhere to be written and was discarded,
+     costing a whole extra round-trip (measured), while the per-field re-ask bound could not even
+     count an ask with no field identity. Which field needs an answer is a semantic judgment Stage 1
+     already makes, per element; a substring scan of the HTML is neither semantic nor attributable.
   4. PII Vault Write-Back on Clarification (Fix 6d):
      When the citizen answers a clarifying question (`hitl_intercept_node`), upserts
      the verified answer back into `user_vault` so subsequent scheme applications
@@ -46,7 +54,15 @@ from product_inference.browser_manager import (
     run_pw
 )
 from product_inference.perception_engine import perceive_dom_state, compute_control_state_fingerprint
-from product_inference.llm_planner import plan_wizard_step, press_finally_submits, DEFAULT_PLANNER_MODEL
+from product_inference.llm_planner import (
+    plan_wizard_step,
+    press_finally_submits,
+    is_final_review_screen,
+    page_confirms_submission,
+    gate_identity,
+    is_pressable_element,
+    DEFAULT_PLANNER_MODEL,
+)
 
 
 # Everything a citizen could interact with on a form page. Used as a cheap fingerprint of the
@@ -54,6 +70,12 @@ from product_inference.llm_planner import plan_wizard_step, press_finally_submit
 # reasoned about a DOM that no longer exists and must be re-planned. Buttons are deliberately
 # included — controls appearing or disappearing is exactly the signal we need to catch.
 INTERACTIVE_SELECTOR = "input, select, textarea, button, [role='button']"
+
+# The same surface restricted to what is actually pressable right now. A control going from disabled
+# to enabled changes nothing about the element COUNT, so the count alone cannot see a field unlocking
+# its own "Verify" — which is precisely the moment the rest of a planned batch goes stale, because
+# perception drops disabled elements and therefore planned around a control that did not exist.
+ENABLED_SELECTOR = ", ".join(f"{part.strip()}:not(:disabled)" for part in INTERACTIVE_SELECTOR.split(","))
 
 # How many times the loop may accept "the form's own state changed" as progress on one screen
 # before treating the screen as stuck. See check_status_node.
@@ -75,6 +97,7 @@ class AutomationState(TypedDict, total=False):
     regressive_gates: dict[str, list[str]]   # screen signature -> gate identities observed to go backwards
     control_state: str                       # fingerprint of what the screen's controls currently hold
     pressed_gates: dict[str, list[str]]      # screen signature -> controls pressed there that changed nothing
+    initial_gates: dict[str, list[str]]      # screen signature -> pressable controls present at FIRST perception
     clicked_gates: list[str]                 # controls clicked in the batch just executed
     clicked_confirm_gates: list[str]         # of those, the ones submitting a single field for checking
     in_place_progress: int                   # accepted control-state changes on the current screen
@@ -129,11 +152,29 @@ def perceive_node(state: AutomationState) -> AutomationState:
 
     print(f"  [Perception Complete] Elements: {perception['total_collapsed_count']} | Signature: {new_sig}")
 
+    # What this screen offered to press the FIRST time we ever stood on it. Perception drops disabled
+    # elements, so a control the portal keeps locked until a field holds a value is simply absent
+    # here — and its later appearance is the evidence that it belongs to whatever was entered. That
+    # is the pairing signal `plan_node` reads, and it survives being filled by anyone: the citizen's
+    # HITL answer is injected straight into the DOM by `core_inference.graph._inject_hitl_answer`,
+    # outside this graph entirely, so nothing that watches an action's own before/after can see it.
+    #
+    # Written once per signature and never refreshed. Re-snapshotting on a later visit would record
+    # the unlocked control as having been there all along, erasing the very transition being looked
+    # for. Copy-and-extend rather than mutating: `state` is LangGraph's, not ours.
+    initial = {k: list(v) for k, v in (state.get("initial_gates") or {}).items()}
+    if new_sig not in initial:
+        initial[new_sig] = sorted({
+            gate_identity(el) for el in perception.get("elements_list", [])
+            if is_pressable_element(el)
+        })
+
     return {
         "perception": perception,
         "page_signature": new_sig,
         "control_state": perception.get("control_state", ""),
         "history_signatures": history + [new_sig] if new_sig not in history else history,
+        "initial_gates": initial,
         "status": "planning"
     }
 
@@ -158,13 +199,27 @@ def plan_node(state: AutomationState) -> AutomationState:
 
     pressed_here = set(state.get("pressed_gates", {}).get(state.get("page_signature", ""), []))
 
+    # Which controls this screen did NOT offer when we arrived on it. A control the portal unlocked
+    # since then did so in response to something that was entered, which is what binds it to that
+    # entry — so the planner prefers it over a control that was pressable from the start. Empty on a
+    # screen's first cycle, because `perceive_node` just took the snapshot from this same perception.
+    seen_first = set((state.get("initial_gates") or {}).get(state.get("page_signature", ""), []))
+    newly_available = {
+        gate_identity(el) for el in perception.get("elements_list", [])
+        if is_pressable_element(el)
+    } - seen_first
+    if newly_available:
+        print(f"  [Unlocked Since Arrival] {len(newly_available)} control(s) on this screen appeared only "
+              f"after something was entered; preferred over controls that were pressable all along.")
+
     plan_result = plan_wizard_step(
         perception=perception,
         user_vault=user_vault,
         document_vault=document_vault,
         model=DEFAULT_PLANNER_MODEL,
         regressive_gates=blocked_here,
-        pressed_gates=pressed_here
+        pressed_gates=pressed_here,
+        newly_available_gates=newly_available
     )
 
     planner_status = plan_result.get("status")
@@ -224,7 +279,16 @@ def plan_node(state: AutomationState) -> AutomationState:
             "actions_to_execute": actions
         }
     elif planner_status == "perceiving":
-        # No actions available; might be on a static review page or need check
+        # Nothing left to do on this screen. That is what the end of the form looks like from the
+        # inside, so this is where the review gate is decided — before anything is pressed, against
+        # perception that was taken this cycle, and only on the cycles that produced no work, so the
+        # extra reading costs nothing on the many cycles that did. Judged by what the screen means
+        # rather than by English headings like "review and submit", which a Hindi or Tamil portal
+        # would sail straight past on its way to its own submit button.
+        if is_final_review_screen(perception):
+            print("  [Final Review Gate Reached] Nothing left to fill and the screen reads as the "
+                  "final review. Halting for the citizen's explicit CONFIRM.")
+            return {"status": "final_confirmation", "actions_to_execute": []}
         return {
             "status": "check",
             "actions_to_execute": []
@@ -277,6 +341,7 @@ def execute_node(state: AutomationState) -> AutomationState:
 
         try:
             pre_count = run_pw(active_page.locator(INTERACTIVE_SELECTOR).count)
+            pre_enabled = run_pw(active_page.locator(ENABLED_SELECTOR).count)
 
             if act_type == "type":
                 run_pw(locator.first.fill, str(val))
@@ -311,8 +376,9 @@ def execute_node(state: AutomationState) -> AutomationState:
             # a captcha "Refresh" clears the box beside it, so the answer is gone and the portal asks
             # again — repeat that and the step never completes. Judged from what the press did, not
             # from what Stage 1 called the control, because a 4B classifier called Refresh a forward
-            # control on every cycle it saw one. Checked at the press itself, since the mid-flow
-            # intercept below returns before any post-batch check could run.
+            # control on every cycle it saw one. Checked at the press itself rather than only after
+            # the batch, because the staleness guard below can return straight to perception and skip
+            # check_status_node's copy of this test entirely.
             #
             # Controls that submit a single field for checking are exempt: a portal clearing a
             # rejected captcha is the value being wrong, not the control being destructive.
@@ -343,21 +409,23 @@ def execute_node(state: AutomationState) -> AutomationState:
                 print(f"  [DOM Changed] Interactive element count {pre_count} -> {post_count} after action #{el_id}. Re-perceiving before continuing.")
                 return _with_presses({"status": "perceiving"})
 
-            # *** HITL GATE: Mid-Flow OTP or Captcha Interception ***
-            page_text_lower = run_pw(active_page.content).lower()
-            if any(w in page_text_lower for w in ["enter otp", "one time password", "captcha code", "enter verification code"]):
-                print("  [HITL Intercept] Mid-flow OTP/Captcha screen detected after action!")
-                # Take screenshot for citizen review
-                shot_path = os.path.join(state.get("screenshots_dir", "screenshots"), f"{session_id}_otp_intercept.png")
-                try:
-                    run_pw(active_page.screenshot, path=shot_path, full_page=True)
-                except Exception:
-                    pass
-                return _with_presses({
-                    "status": "hitl_intercept",
-                    "unresolved_questions": ["[OTP/Captcha Required] Portal requires verification. Please enter the code sent to your mobile or shown on screen:"],
-                    "actions_to_execute": actions[i+1:] # Save remaining actions if any
-                })
+            # A control the entry just UNLOCKED is a changed interactive surface too, and the count
+            # above cannot see it: portals keep a field's own "Verify" disabled until the field holds
+            # a value, and disabled -> enabled leaves the element count identical. Perception drops
+            # disabled elements, so such a control did not exist when this batch was planned — which
+            # is how the mock's Step 3 ends up with "Refresh", the one always-enabled control beside
+            # the captcha box, as the best remaining candidate to press.
+            #
+            # A queued press that CONFIRMS the entry we just made is exempt, and that exemption is the
+            # whole point rather than a loophole: such a press was chosen because of this field, so it
+            # cannot be stale with respect to it. Without the exemption this guard would defer every
+            # "fill the code, then press its Verify" pairing by a cycle — the exact ordering the guard
+            # exists to protect.
+            post_enabled = run_pw(active_page.locator(ENABLED_SELECTOR).count)
+            if pre_enabled != post_enabled and any(not a.get("confirms_entry") for a in actions[i + 1:]):
+                print(f"  [Controls Unlocked] Pressable controls {pre_enabled} -> {post_enabled} after action "
+                      f"#{el_id}; the rest of this batch was planned without them. Re-perceiving.")
+                return _with_presses({"status": "perceiving"})
 
         except Exception as e:
             print(f"     [Action Error on ID #{el_id}] {e}")
@@ -434,16 +502,29 @@ def check_status_node(state: AutomationState) -> AutomationState:
     new_sig = run_pw(compute_page_signature, active_page)
     print(f"  [Signature Check] Old: {old_sig} -> New: {new_sig}")
 
-    # Check for completion keywords or final summary review screens
-    page_text_lower = run_pw(active_page.content).lower()
-    if any(w in page_text_lower for w in ["application submitted successfully", "acknowledgement number", "application reference"]):
-        print("  [OK: Form Complete] Submission confirmation detected!")
-        return {"status": "form_complete"}
+    # Has the portal acknowledged a filing? Read by meaning rather than matched against English
+    # phrases like "acknowledgement number", which say nothing on a portal written in Hindi or Tamil —
+    # and getting this wrong is not a cosmetic error: a missed acknowledgement makes the loop keep
+    # working on a form that is already submitted, and eventually tell the citizen the automation
+    # failed when their application was in fact filed.
+    #
+    # Asked only when the screen actually changed. An acknowledgement replaces the form with a receipt,
+    # so it is a new screen by definition and an unchanged signature cannot be one — which keeps this
+    # off the per-cycle path and down to roughly once per step transition.
+    if new_sig != old_sig:
+        try:
+            page_text = run_pw(active_page.locator("body").inner_text, timeout=3000)
+        except Exception:
+            page_text = ""
+        if page_text and page_confirms_submission(page_text):
+            print("  [OK: Form Complete] The portal confirms the application has been submitted.")
+            return {"status": "form_complete"}
 
-    # Check if we reached the Final Summary / Declaration Review page
-    if any(w in page_text_lower for w in ["review and submit", "confirm application details", "final review", "declaration & submit"]):
-        print("  [Final Review Gate Reached] Routing to final confirmation node without auto-submitting.")
-        return {"status": "final_confirmation"}
+    # The final-review gate is deliberately NOT decided here any more. It used to be, by matching
+    # English headings, and that placement was wrong on its own terms: this node runs AFTER the batch
+    # has executed, and detection that happens after an irreversible action is not a safeguard. The
+    # judgment now sits in plan_node, before anything is pressed, where perception is fresh — next to
+    # the pre-press submit refusal that is the actual guarantee.
 
     # If signature changed, we successfully navigated to a new wizard step!
     if new_sig != old_sig:
@@ -572,7 +653,21 @@ def hitl_intercept_node(state: AutomationState) -> AutomationState:
     print(f"\n[Graph: hitl_intercept_node] Session: {session_id} | Status: Paused for Citizen Input")
 
     if not hitl_input:
-        # First time entering intercept node; return state so external bot.py can send Discord DM
+        # Show the citizen the screen they are being asked about, whatever raised the question.
+        # A captcha is unanswerable without seeing it, and the screenshot used to be captured only by
+        # a keyword scan for OTP/captcha wording — so a portal that asked in Hindi, or that the
+        # classifier flagged as an ordinary missing field, produced a question about a challenge the
+        # citizen could not read. Both bots attach this file for a `hitl_paused` turn, so capturing it
+        # at the pause itself covers every route into one, not the one route that matched English.
+        shot_path = os.path.join(state.get("screenshots_dir", "screenshots"), f"{session_id}_otp_intercept.png")
+        try:
+            active_page = run_pw(get_active_page, session_id)
+            if active_page and not run_pw(active_page.is_closed):
+                os.makedirs(state.get("screenshots_dir", "screenshots"), exist_ok=True)
+                run_pw(active_page.screenshot, path=shot_path, full_page=True)
+                print(f"  [Pause Screenshot] Captured what the citizen is being asked about: {shot_path}")
+        except Exception as e:
+            print(f"  [Pause Screenshot Notice] Could not capture the paused screen: {e}")
         return {"status": "hitl_paused"}
 
     print(f"  [HITL Input Received] Citizen replied: '{hitl_input}'")
@@ -589,18 +684,13 @@ def hitl_intercept_node(state: AutomationState) -> AutomationState:
             user_vault[field_name] = hitl_input
             state["user_vault"] = user_vault
             print(f"  [Vault Upsert] Saved clarified answer '{hitl_input}' under vault key '{field_name}'!")
-            
-            # If we reached OTP/Captcha stage and citizen entered code, inject into field directly
-            if any(k in field_name for k in ["otp", "captcha", "verification"]):
-                active_page = run_pw(get_active_page, session_id)
-                if active_page and not run_pw(active_page.is_closed):
-                    try:
-                        loc = run_pw(active_page.locator, f'[data-ym-id="{unresolved_fields[0].get("id")}"]')
-                        if loc:
-                            run_pw(loc.first.fill, str(hitl_input))
-                            run_pw(active_page.locator("button:has-text('Verify'), input[type='submit'], button:has-text('Submit')").first.click, timeout=8000)
-                    except Exception as e:
-                        print(f"  [OTP Injection Note] Could not auto-inject into box: {e}")
+
+            # Delivering the answer into the element that asked for it is core_inference.graph's
+            # `_inject_hitl_answer`, on the resume path this node is never reached by (each resume is
+            # a fresh subgraph invocation entering at perceive_node, which is why `hitl_input` is
+            # never set here). What used to sit here selected the field by English key fragments and
+            # then pressed `button:has-text('Verify')` — a control chosen by English button text on a
+            # portal that may say "सत्यापित करें", and a press the planner alone is entitled to decide.
 
     # Clear hitl_input after consumption and resume perception loop
     state["hitl_input"] = None
@@ -679,8 +769,7 @@ def route_after_execute(state: AutomationState) -> str:
     status = state.get("status", "check")
     return {
         "check": "check_status_node",
-        "perceiving": "perceive_node",       # Triggered on cascading dropdown re-render
-        "hitl_intercept": "hitl_intercept",  # Triggered on mid-flow OTP/Captcha screen
+        "perceiving": "perceive_node",       # Cascading re-render, or a control the entry just enabled
         "error": "error_end"
     }.get(status, "check_status_node")
 
@@ -802,6 +891,7 @@ if __name__ == "__main__":
         "history_signatures": [],
         "regressive_gates": {},
         "pressed_gates": {},
+        "initial_gates": {},
         "retries": 0,
         "screenshots_dir": "screenshots"
     }
