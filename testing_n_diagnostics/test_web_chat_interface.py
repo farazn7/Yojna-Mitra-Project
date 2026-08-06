@@ -830,6 +830,27 @@ class TestStaticSurface:
         css = signed_in.get("/styles.css").text
         assert ".shell.show-side .side .back" in css
 
+    def test_the_wire_key_matches_what_the_client_switches_on(self, signed_in):
+        """The server tags every SSE payload with `kind`; app.js switches on `ev.kind`.
+
+        If those two ever drift, every event falls through the switch and the page goes
+        silent — no error, no console warning, just a chat that never answers. Nothing
+        else in this suite would notice, because the renderer and the wire format are
+        tested on opposite sides of the gap.
+        """
+        js = signed_in.get("/app.js").text
+        assert "switch (ev.kind)" in js, "client no longer dispatches on `kind`"
+
+        for event, expected in [
+            (Status(text="working"), "status"),
+            (Message(text="hello"), "message"),
+            (Error(text="bad"), "error"),
+        ]:
+            payload = server._public_event(event)
+            assert payload["kind"] == expected
+            # and the client must actually have a branch for it
+            assert f'case "{expected}"' in js, f"client has no branch for {expected}"
+
     def test_the_confirm_button_is_still_not_a_privileged_route(self, signed_in):
         js = signed_in.get("/app.js").text
         # It must send the literal string through the ordinary chat path, so the graph's
