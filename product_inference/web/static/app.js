@@ -171,7 +171,11 @@ async function consume(response) {
         case "profilerequired":
           setStatus("");
           addMessage("bot", ev.text || "Please fill your profile first.");
-          openProfile();
+          // Open the panel alongside the message rather than over it. The graph asked for
+          // a profile, so surface the form — but the composer stays live, because the
+          // citizen may well want to ask what any of this is for before answering.
+          expandProfile();
+          loadProfile();
           break;
 
         case "error":
@@ -235,14 +239,55 @@ async function upload(file) {
   }
 }
 
-/* ── Profile modal ───────────────────────────────────────────── */
+/* ── Profile panel ───────────────────────────────────────────── */
 
-const overlay = $("profile-overlay");
+const profileSection = $("profile-section");
+const profileBody = $("profile-body");
 const fieldsBox = $("profile-fields");
+const nudge = $("nudge");
 let formSchema = [];
+let loadedProfile = false;
 
-async function openProfile() {
-  overlay.classList.remove("hidden");
+/* The nudge is the whole "don't force them" design: it states the cost of an incomplete
+   profile and offers the fix, but never blocks a turn. */
+function renderProgress(progress) {
+  if (!progress) return;
+  const { answered, total } = progress;
+  const tally = $("profile-tally");
+  tally.textContent = `${answered}/${total}`;
+  tally.classList.toggle("done", answered === total);
+
+  if (answered === total) { nudge.classList.add("hidden"); return; }
+  $("nudge-text").textContent =
+    `${answered} of ${total} profile details filled in — the more I know, ` +
+    `the better I can match schemes to you.`;
+  nudge.classList.remove("hidden");
+}
+
+function expandProfile() {
+  profileSection.classList.add("open");
+  profileBody.classList.remove("hidden");
+  $("btn-profile-toggle").setAttribute("aria-expanded", "true");
+  // On narrow screens the whole side panel is off-canvas.
+  if (window.matchMedia("(max-width: 900px)").matches) {
+    $("shell").classList.add("show-side");
+  }
+  profileSection.scrollIntoView({ block: "nearest" });
+}
+
+function collapseProfile() {
+  profileSection.classList.remove("open");
+  profileBody.classList.add("hidden");
+  $("btn-profile-toggle").setAttribute("aria-expanded", "false");
+}
+
+function toggleProfile() {
+  if (profileSection.classList.contains("open")) collapseProfile();
+  else { expandProfile(); loadProfile(); }
+}
+
+async function loadProfile({ force = false } = {}) {
+  if (loadedProfile && !force) return;
   $("profile-msg").textContent = "";
   fieldsBox.innerHTML = "<div class='empty'>Loading…</div>";
 
@@ -252,6 +297,8 @@ async function openProfile() {
 
   const data = await res.json();
   formSchema = data.schema;
+  loadedProfile = true;
+  renderProgress(data.progress);
   fieldsBox.innerHTML = "";
 
   for (const f of formSchema) {
@@ -313,8 +360,18 @@ async function saveProfile() {
   const data = await res.json().catch(() => ({}));
 
   if (res.ok && data.ok) {
-    overlay.classList.add("hidden");
-    addMessage("bot", data.summary);
+    renderProgress(data.progress);
+    // The panel stays open and the conversation stays put. Only a finished profile is
+    // worth a chat message; a partial save is a quiet confirmation in the panel.
+    if (data.summary) {
+      addMessage("bot", data.summary);
+      collapseProfile();
+    } else {
+      const left = data.progress ? data.progress.total - data.progress.answered : 0;
+      $("profile-msg").textContent = left
+        ? `Saved — ${left} left whenever you like.`
+        : "Saved.";
+    }
     return;
   }
 
@@ -369,10 +426,10 @@ $("btn-confirm").addEventListener("click", () => {
 
 $("btn-dismiss").addEventListener("click", () => gate.classList.add("hidden"));
 
-$("btn-profile").addEventListener("click", openProfile);
-$("btn-profile-close").addEventListener("click", () => overlay.classList.add("hidden"));
+$("btn-profile").addEventListener("click", toggleProfile);
+$("btn-profile-toggle").addEventListener("click", toggleProfile);
 $("btn-profile-save").addEventListener("click", saveProfile);
-overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.classList.add("hidden"); });
+$("btn-nudge").addEventListener("click", () => { expandProfile(); loadProfile(); });
 
 $("btn-reset").addEventListener("click", async () => {
   if (!confirm("Wipe your profile, documents and conversation history? This cannot be undone.")) return;
@@ -381,13 +438,16 @@ $("btn-reset").addEventListener("click", async () => {
     log.innerHTML = "";
     trace.innerHTML = "<div class='empty'>Nodes light up here as the state machine runs.</div>";
     shots.innerHTML = "<div class='empty'>Portal screenshots appear here during an application.</div>";
-    addMessage("bot", "Everything has been wiped. Fill your profile to start again.");
+    // Re-read rather than assume: the panel still shows the wiped citizen's old answers.
+    await loadProfile({ force: true });
+    addMessage("bot", "Everything has been wiped — profile, documents, conversation, and any portal logins the browser had saved.");
   } else {
     addMessage("bot", "Reset failed.", "error");
   }
 });
 
 $("btn-panel").addEventListener("click", () => $("shell").classList.toggle("show-side"));
+$("btn-back").addEventListener("click", () => $("shell").classList.remove("show-side"));
 
 /* Boot */
 (async () => {
@@ -401,6 +461,10 @@ $("btn-panel").addEventListener("click", () => $("shell").classList.toggle("show
   if (window.matchMedia("(max-width: 900px)").matches) {
     $("btn-panel").style.display = "";
   }
+
+  // Renders the tally and the nudge without opening anything. A returning citizen sees
+  // "9/13" and a one-line reason to finish, and can ignore both.
+  await loadProfile().catch(() => { /* the panel is optional; chat still works */ });
 
   addMessage("bot",
     "Namaste! 🙏 I can help you find government welfare schemes you're eligible for, " +

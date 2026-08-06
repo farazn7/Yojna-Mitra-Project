@@ -303,16 +303,33 @@ async def get_profile(ym_session: Optional[str] = Cookie(default=None)):
         "profile": saved,
         "state": state,
         "complete": not profile_form.validate_profile(saved),
+        "progress": profile_form.progress(saved),
     }
 
 
 @app.post("/api/profile")
 async def save_profile(request: Request, ym_session: Optional[str] = Cookie(default=None)):
-    """Coerce and save a submitted profile.
+    """Coerce and save a submitted profile, whole or partial.
 
     Coercion goes through `profile_form.apply_field`, the same function the Telegram
     keyboard uses, so a profile saved from the browser is byte-identical in shape to one
     saved from a chat form — including the derived `disability_percentage`.
+
+    Partial saves are accepted on purpose. The browser form is a side panel the citizen
+    can answer a field at a time while still chatting, so refusing to persist anything
+    until all five gate fields are present would silently throw away work between visits.
+    An incomplete profile still gets stored; it just does not advance `current_state`.
+
+    Two things this must not do, both of which the whole-form-only version did:
+
+      - Start from `profile_form.defaults()`. `db.update_user_state` merges with
+        `profile_data || %s::jsonb`, so a partial save built on defaults would write
+        `gender="Unknown"`, `residence="Urban"`, `marital_status="Single"` straight over
+        answers the citizen had already given. It layers onto the stored profile instead.
+      - Invent answers for unasked fields. `hybrid_rag.py:148-158` turns each present
+        field into a line of the LLM's personalisation context, so a defaulted
+        `residence` is not a harmless placeholder — it is the model being told this
+        citizen lives in a city when nobody asked.
     """
     user_id = _require_user(ym_session)
     body = await request.json()
@@ -320,30 +337,51 @@ async def save_profile(request: Request, ym_session: Optional[str] = Cookie(defa
     if not isinstance(submitted, dict):
         raise HTTPException(status_code=400, detail="profile must be an object")
 
-    data = profile_form.defaults()
+    try:
+        record = await asyncio.to_thread(db.get_or_create_user, user_id, "WebUser")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Web Profile Save Error] {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503, detail="Profile store is unavailable.")
+
+    stored = (record or {}).get("profile_data") or {}
+    current_state = (record or {}).get("current_state") or "START"
+
+    data = dict(stored)
     errors: dict[str, str] = {}
 
     for field in profile_form.FORM_FIELDS:
         if field not in submitted:
             continue
-        ok, message = profile_form.apply_field(data, field, submitted[field])
+        value = submitted[field]
+        if value in (None, ""):
+            continue  # left blank in the panel — not an answer, and not an error either
+        ok, message = profile_form.apply_field(data, field, value)
         if not ok:
             errors[field] = message
 
     if errors:
         return JSONResponse({"ok": False, "errors": errors}, status_code=400)
 
-    problems = profile_form.validate_profile(data)
-    if problems:
-        return JSONResponse({"ok": False, "problems": problems}, status_code=400)
+    # Only claim the profile is complete once the graph would actually agree.
+    progress = profile_form.progress(data)
+    next_state = "PROFILE_COMPLETE" if progress["usable"] else current_state
 
     try:
-        await asyncio.to_thread(db.update_user_state, user_id, "PROFILE_COMPLETE", data)
+        await asyncio.to_thread(db.update_user_state, user_id, next_state, data)
     except Exception as exc:  # noqa: BLE001
         print(f"[Web Profile Save Error] {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=503, detail="Could not save profile.")
 
-    return {"ok": True, "summary": profile_form.format_profile_summary(data, bold="**")}
+    return {
+        "ok": True,
+        "progress": progress,
+        "profile": data,
+        # The full summary is chat-worthy only when there is a full profile to summarise.
+        "summary": (
+            profile_form.format_profile_summary(data, bold="**")
+            if progress["answered"] == progress["total"] else None
+        ),
+    }
 
 
 @app.post("/api/reset")

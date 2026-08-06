@@ -628,6 +628,27 @@ class TestUploadRoute:
         assert "Aadhaar" in res.text
 
 
+def stored_profile(data: dict, state: str = "PROFILE_COMPLETE"):
+    """Patch what the DB already holds for this citizen.
+
+    Both /api/profile verbs read the stored row now — GET to prefill, POST to merge onto
+    rather than clobber. Patching it keeps the suite runnable with Postgres down, which is
+    how it is usually run.
+    """
+    return patch("product_inference.db.get_or_create_user",
+                 lambda *a, **k: {"profile_data": dict(data), "current_state": state})
+
+
+class save_capture:
+    """Records the (user_id, state, data) triple the endpoint would have written."""
+
+    def __init__(self):
+        self.user_id = self.state = self.data = None
+
+    def save(self, user_id, state, data=None):
+        self.user_id, self.state, self.data = user_id, state, data
+
+
 class TestProfileRoute:
     def test_get_returns_schema_and_saved_profile(self, signed_in):
         saved = {"gender": "Male", "age": 22, "income": 45000,
@@ -641,44 +662,144 @@ class TestProfileRoute:
         assert body["complete"] is True
 
     def test_post_coerces_like_the_telegram_form(self, signed_in):
-        captured = {}
-
-        def fake_save(user_id, state, data):
-            captured.update({"user_id": user_id, "state": state, "data": data})
-
+        captured = save_capture()
         payload = {
             "name": "faraz nezam", "gender": "Male", "age": "22",
             "income": "45,000", "caste": "OBC", "occupation": "student",
             "differently_abled": "true",
         }
-        with patch("product_inference.db.update_user_state", fake_save):
+        with stored_profile({}), patch("product_inference.db.update_user_state", captured.save):
             res = signed_in.post("/api/profile", json={"profile": payload})
 
         assert res.status_code == 200
-        data = captured["data"]
+        data = captured.data
         assert data["age"] == 22 and isinstance(data["age"], int)
         assert data["income"] == 45000
         assert data["name"] == "Faraz Nezam"
         assert data["differently_abled"] is True
         assert data["disability_percentage"] == 40
-        assert captured["user_id"] == USER
-        assert captured["state"] == "PROFILE_COMPLETE"
+        assert captured.user_id == USER
+        assert captured.state == "PROFILE_COMPLETE"
 
     def test_post_reports_field_errors(self, signed_in):
-        res = signed_in.post("/api/profile", json={"profile": {
-            "gender": "Male", "age": "not-a-number", "income": "45000",
-            "caste": "OBC", "occupation": "Student",
-        }})
+        with stored_profile({}), patch("product_inference.db.update_user_state", lambda *a: None):
+            res = signed_in.post("/api/profile", json={"profile": {
+                "gender": "Male", "age": "not-a-number", "income": "45000",
+                "caste": "OBC", "occupation": "Student",
+            }})
         assert res.status_code == 400
         assert "age" in res.json()["errors"]
 
-    def test_post_rejects_incomplete_profile(self, signed_in):
-        res = signed_in.post("/api/profile", json={"profile": {"gender": "Male"}})
-        assert res.status_code == 400
-        assert res.json()["problems"]
-
     def test_post_rejects_non_object(self, signed_in):
         assert signed_in.post("/api/profile", json={"profile": "nope"}).status_code == 400
+
+
+class TestPartialProfileIsAllowed:
+    """The profile is a nudge, not a gate.
+
+    Scheme search runs on five fields; all thirteen only sharpen personalisation. So a
+    citizen answering the side panel one field at a time must have that work persisted,
+    and must never be refused a turn for it.
+    """
+
+    def test_a_single_field_saves(self, signed_in):
+        captured = save_capture()
+        with stored_profile({}), patch("product_inference.db.update_user_state", captured.save):
+            res = signed_in.post("/api/profile", json={"profile": {"gender": "Male"}})
+
+        assert res.status_code == 200
+        assert res.json()["ok"] is True
+        assert captured.data["gender"] == "Male"
+
+    def test_an_incomplete_save_does_not_claim_completion(self, signed_in):
+        captured = save_capture()
+        with stored_profile({}, state="START"), \
+             patch("product_inference.db.update_user_state", captured.save):
+            body = signed_in.post("/api/profile", json={"profile": {"gender": "Male"}}).json()
+
+        # Advancing the FSM here would tell the graph a profile exists that does not.
+        assert captured.state == "START"
+        assert body["progress"]["usable"] is False
+        assert body["summary"] is None
+
+    def test_the_five_gate_fields_flip_it_to_usable(self, signed_in):
+        captured = save_capture()
+        with stored_profile({}, state="START"), \
+             patch("product_inference.db.update_user_state", captured.save):
+            body = signed_in.post("/api/profile", json={"profile": {
+                "gender": "Male", "age": "22", "income": "45000",
+                "caste": "OBC", "occupation": "Student",
+            }}).json()
+
+        assert captured.state == "PROFILE_COMPLETE"
+        assert body["progress"]["usable"] is True
+        # Usable is not finished — 5 of 13 answered still leaves the nudge on screen.
+        assert body["progress"]["answered"] == 5
+        assert body["summary"] is None
+
+    def test_a_partial_save_never_overwrites_earlier_answers(self, signed_in):
+        """The regression this endpoint was built to avoid.
+
+        `db.update_user_state` merges with `profile_data || %s::jsonb`, so anything the
+        endpoint puts in the payload wins. Building the payload from `defaults()` meant a
+        one-field save silently rewrote residence to Urban and marital_status to Single.
+        """
+        already = {"name": "Faraz Nezam", "residence": "Rural",
+                   "marital_status": "Married", "caste": "OBC"}
+        captured = save_capture()
+        with stored_profile(already), patch("product_inference.db.update_user_state", captured.save):
+            signed_in.post("/api/profile", json={"profile": {"age": "22"}})
+
+        assert captured.data["residence"] == "Rural"
+        assert captured.data["marital_status"] == "Married"
+        assert captured.data["name"] == "Faraz Nezam"
+        assert captured.data["age"] == 22
+
+    def test_unanswered_fields_are_not_invented(self, signed_in):
+        """hybrid_rag turns every present field into a line of LLM context.
+
+        A defaulted `residence` is not a harmless placeholder — it is the model being told
+        this citizen lives in a city when nobody asked.
+        """
+        captured = save_capture()
+        with stored_profile({}), patch("product_inference.db.update_user_state", captured.save):
+            signed_in.post("/api/profile", json={"profile": {"name": "Faraz"}})
+
+        for never_asked in ("residence", "marital_status", "gender", "age", "income"):
+            assert never_asked not in captured.data, f"invented {never_asked}"
+
+    def test_blank_values_are_not_errors(self, signed_in):
+        """An empty box in the panel is an unanswered question, not a bad answer."""
+        captured = save_capture()
+        with stored_profile({}), patch("product_inference.db.update_user_state", captured.save):
+            res = signed_in.post("/api/profile", json={"profile": {
+                "name": "Faraz", "age": "", "income": None,
+            }})
+
+        assert res.status_code == 200
+        assert "age" not in captured.data and "income" not in captured.data
+
+    def test_get_reports_progress_for_the_nudge(self, signed_in):
+        saved = {"gender": "Male", "age": 22, "income": 45000,
+                 "caste": "OBC", "occupation": "Student"}
+        with stored_profile(saved):
+            body = signed_in.get("/api/profile").json()
+
+        assert body["progress"]["answered"] == 5
+        assert body["progress"]["total"] == 13
+        assert "name" in body["progress"]["missing"]
+
+    def test_a_full_profile_gets_a_summary_and_no_nudge(self, signed_in):
+        full = {f: "Yes" for f in pf.FORM_FIELDS}
+        full.update({"age": "22", "income": "45000", "gender": "Male",
+                     "caste": "OBC", "occupation": "Student", "name": "Faraz"})
+        captured = save_capture()
+        with stored_profile({}), patch("product_inference.db.update_user_state", captured.save):
+            body = signed_in.post("/api/profile", json={"profile": full}).json()
+
+        assert body["progress"]["answered"] == 13
+        assert body["summary"] is not None
+        assert "Profile Saved Successfully" in body["summary"]
 
 
 class TestStaticSurface:
@@ -691,6 +812,29 @@ class TestStaticSurface:
 
     def test_healthz(self, client):
         assert client.get("/healthz").json() == {"ok": True}
+
+    def test_the_profile_is_a_panel_not_a_blocking_overlay(self, signed_in):
+        page = signed_in.get("/").text
+        assert 'id="profile-section"' in page
+        assert 'id="nudge"' in page
+        # The overlay was modal: it covered the conversation and took the composer with
+        # it. Filling in a profile must never cost the citizen their place in the chat.
+        assert 'class="overlay' not in page
+        assert 'id="profile-overlay"' not in page
+
+    def test_the_panel_carries_its_own_way_back_on_mobile(self, signed_in):
+        # .shell.show-side hides .main, and the header lives inside .main — so the toggle
+        # that opened the panel is itself hidden while the panel is open.
+        page = signed_in.get("/").text
+        assert 'id="btn-back"' in page
+        css = signed_in.get("/styles.css").text
+        assert ".shell.show-side .side .back" in css
+
+    def test_the_confirm_button_is_still_not_a_privileged_route(self, signed_in):
+        js = signed_in.get("/app.js").text
+        # It must send the literal string through the ordinary chat path, so the graph's
+        # interrupt/resume gate stays the only thing deciding a government form submit.
+        assert 'send("CONFIRM")' in js
 
 
 # ==============================================================================
@@ -933,3 +1077,142 @@ class TestTelegramWiring:
         source = inspect.getsource(bt)
         assert "FORM_FLOW = [" not in source
         assert bt.FORM_FLOW is pf.FORM_FLOW
+
+
+# ==============================================================================
+# 8. Profile progress — the 13 vs the 5
+# ==============================================================================
+
+class TestProfileProgress:
+    def test_the_form_is_thirteen_fields_starting_with_name(self):
+        assert len(pf.FORM_FIELDS) == 13
+        assert pf.FORM_FIELDS[0] == "name"
+        assert pf.FORM_FIELDS[-1] == "income"
+
+    def test_routing_gates_on_five_but_progress_counts_thirteen(self):
+        five = {"gender": "Male", "age": 22, "income": 45000,
+                "caste": "OBC", "occupation": "Student"}
+        p = pf.progress(five)
+        assert p["usable"] is True      # graph.is_profile_complete would route
+        assert p["answered"] == 5       # but the citizen is far from done
+        assert p["total"] == 13
+
+    def test_false_counts_as_an_answer(self):
+        """"No, I don't have a BPL card" is an answer, and hybrid_rag reads it as one."""
+        p = pf.progress({"below_poverty_line": False, "minority": False})
+        assert p["answered"] == 2
+        assert "below_poverty_line" not in p["missing"]
+
+    def test_blank_and_none_do_not_count(self):
+        p = pf.progress({"name": "", "gender": None, "caste": "OBC"})
+        assert p["answered"] == 1
+        assert "name" in p["missing"] and "gender" in p["missing"]
+
+    def test_missing_is_in_form_order(self):
+        missing = pf.progress({})["missing"]
+        assert missing == pf.FORM_FIELDS
+
+
+# ==============================================================================
+# 9. /reset erases the browser profile
+# ==============================================================================
+
+class TestBrowserProfileWipe:
+    """A reset that leaves portal cookies on disk is the one failure a citizen on a
+    shared machine cannot see and cannot undo."""
+
+    def test_both_naming_conventions_are_targeted(self):
+        # graph.py launches automation as auto_<user_id>; browser_manager then prefixes
+        # user_. Guessing only one convention deletes nothing and reports success.
+        assert core_session.browser_session_ids("telegram_9") == ["auto_telegram_9", "telegram_9"]
+
+    def test_it_deletes_the_directory_automation_actually_creates(self, tmp_path, monkeypatch):
+        bm = pytest.importorskip("product_inference.browser_manager")
+        monkeypatch.setattr(bm, "BROWSER_PROFILES_ROOT", str(tmp_path))
+        monkeypatch.setattr(bm, "close_session", lambda _sid: None)
+
+        live = tmp_path / "user_auto_telegram_9"
+        live.mkdir()
+        (live / "Cookies").write_text("portal-session")
+
+        assert core_session.wipe_browser_profile("telegram_9") is True
+        assert not live.exists()
+
+    def test_it_leaves_other_citizens_alone(self, tmp_path, monkeypatch):
+        bm = pytest.importorskip("product_inference.browser_manager")
+        monkeypatch.setattr(bm, "BROWSER_PROFILES_ROOT", str(tmp_path))
+        monkeypatch.setattr(bm, "close_session", lambda _sid: None)
+
+        mine = tmp_path / "user_auto_telegram_9"
+        theirs = tmp_path / "user_auto_telegram_77"
+        mine.mkdir(); theirs.mkdir()
+
+        core_session.wipe_browser_profile("telegram_9")
+        assert not mine.exists()
+        assert theirs.exists()
+
+    def test_a_blank_user_id_cannot_wipe_the_root(self, tmp_path, monkeypatch):
+        bm = pytest.importorskip("product_inference.browser_manager")
+        monkeypatch.setattr(bm, "BROWSER_PROFILES_ROOT", str(tmp_path))
+        monkeypatch.setattr(bm, "close_session", lambda _sid: None)
+
+        (tmp_path / "user_auto_telegram_9").mkdir()
+        assert core_session.wipe_browser_profile("") is False
+        assert (tmp_path / "user_auto_telegram_9").exists()
+
+    def test_the_session_is_closed_before_the_directory_goes(self, tmp_path, monkeypatch):
+        """Chrome holds an exclusive lock on its user-data dir; deleting first fails
+        mid-tree on Windows and leaves a corrupted profile behind."""
+        bm = pytest.importorskip("product_inference.browser_manager")
+        order = []
+        monkeypatch.setattr(bm, "BROWSER_PROFILES_ROOT", str(tmp_path))
+        monkeypatch.setattr(bm, "close_session", lambda sid: order.append(f"close:{sid}"))
+
+        target = tmp_path / "user_auto_telegram_9"
+        target.mkdir()
+
+        real_rmtree = core_session.shutil.rmtree
+
+        def spy(path, **kw):
+            order.append("rmtree")
+            return real_rmtree(path, **kw)
+
+        monkeypatch.setattr(core_session.shutil, "rmtree", spy)
+        core_session.wipe_browser_profile("telegram_9")
+
+        assert order.index("close:auto_telegram_9") < order.index("rmtree")
+
+    def test_a_missing_browser_manager_does_not_break_reset(self, monkeypatch, capsys):
+        """Web-only and voice-only deployments never import Playwright. The DB wipe has
+        already happened by this point and must not be undone by an ImportError."""
+        import builtins
+        real_import = builtins.__import__
+
+        def no_playwright(name, globals=None, locals=None, fromlist=(), level=0):
+            # `from product_inference import browser_manager` arrives as name=
+            # "product_inference" with fromlist=("browser_manager",), so checking the
+            # module name alone would let the import straight through.
+            if "browser_manager" in name or any("browser_manager" in f for f in (fromlist or ())):
+                raise ImportError("no playwright here")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", no_playwright)
+        assert core_session.wipe_browser_profile("telegram_9") is False
+        # Asserting the return value alone would pass even with the guard deleted, since
+        # a user with no profile directory also returns False. Pin it to the branch.
+        monkeypatch.undo()
+        assert "Browser manager unavailable" in capsys.readouterr().out
+
+    def test_every_surface_shares_one_reset(self):
+        """There were four hand-maintained copies, and all four had forgotten the
+        browser profile. Re-adding a local copy is how that happens again.
+
+        Read as text, never imported: `product_inference/bot.py` calls `bot.run(...)` at
+        module scope with no `__main__` guard, so importing it logs into Discord and
+        blocks forever.
+        """
+        root = Path(__file__).resolve().parents[1] / "product_inference"
+        for name in ("bot.py", "bot_audio.py"):
+            source = (root / name).read_text(encoding="utf-8")
+            assert "DELETE FROM user_profiles" not in source, f"{name} grew its own reset again"
+            assert "core_session.do_reset" in source, f"{name} is not using the shared reset"

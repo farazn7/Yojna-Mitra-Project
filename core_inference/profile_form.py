@@ -220,6 +220,39 @@ def apply_field(data: dict, field: str, raw: Any) -> tuple[bool, Optional[str]]:
     return True, None
 
 
+def answered_fields(data: dict) -> list[str]:
+    """The FORM_FLOW fields this citizen has actually answered, in form order.
+
+    `False` counts as answered — "No, I don't have a BPL card" is an answer, and the
+    scheme personalization prompt reads it as one. Only `None` and `""` are unanswered.
+    """
+    return [f for f in FORM_FIELDS if data.get(f) not in (None, "")]
+
+
+def missing_fields(data: dict) -> list[str]:
+    """The complement of `answered_fields`, in form order."""
+    return [f for f in FORM_FIELDS if data.get(f) in (None, "")]
+
+
+def progress(data: dict) -> dict:
+    """Answered/total counts for the surfaces' "complete your profile" nudge.
+
+    `answered` is deliberately measured against all 13 fields, not the 5 that
+    `graph.py:is_profile_complete` gates routing on. Those five decide whether the graph
+    will *run* a scheme search; all thirteen decide how well it is personalised
+    (`hybrid_rag.py:148-158` adds one line to the LLM's context per answered field). A
+    citizen sitting at 5/13 is served, but served worse, and the nudge is what tells them.
+    """
+    answered = answered_fields(data)
+    missing = missing_fields(data)
+    return {
+        "answered": len(answered),
+        "total": len(FORM_FIELDS),
+        "missing": missing,
+        "usable": not validate_profile(data),
+    }
+
+
 def validate_profile(data: dict) -> list[str]:
     """Return a list of problems with a whole profile dict. Empty means usable.
 

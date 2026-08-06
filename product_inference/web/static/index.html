@@ -31,6 +31,13 @@
       </div>
     </div>
 
+    <!-- A nudge, not a gate. Scheme search works without a complete profile; each
+         answered field just adds a line to the personalisation context. -->
+    <div id="nudge" class="hidden">
+      <span id="nudge-text"></span>
+      <button class="link" id="btn-nudge">Complete profile</button>
+    </div>
+
     <form id="composer" autocomplete="off">
       <label class="upload" for="file" title="Upload a document (PDF, PNG, JPG)">📎</label>
       <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg">
@@ -40,6 +47,30 @@
   </div>
 
   <aside class="side">
+    <!-- Narrow screens show the panel full-bleed over the chat, which hides the header
+         holding the toggle. Without this the citizen has no way back to the conversation. -->
+    <button class="ghost back" id="btn-back">← Back to chat</button>
+    <!-- The profile lives here rather than in a modal so answering it never takes the
+         conversation off screen: the citizen can read the last reply while filling it in,
+         and can stop halfway without losing what they typed. -->
+    <div class="section" id="profile-section">
+      <h2>
+        <button class="disclose" id="btn-profile-toggle" aria-expanded="false" aria-controls="profile-body">
+          <span class="caret">▸</span> Your profile
+        </button>
+        <span class="tally" id="profile-tally"></span>
+      </h2>
+      <div id="profile-body" class="hidden">
+        <p class="hint">
+          Optional. Every answer sharpens which schemes you're shown — nothing here is required to chat.
+        </p>
+        <div class="fields" id="profile-fields"></div>
+        <div class="save-row">
+          <button class="primary" id="btn-profile-save">Save</button>
+          <span class="who" id="profile-msg"></span>
+        </div>
+      </div>
+    </div>
     <div class="section grow">
       <h2>Graph trace</h2>
       <div id="trace"><div class="empty">Nodes light up here as the state machine runs.</div></div>
@@ -50,21 +81,6 @@
     </div>
   </aside>
 
-</div>
-
-<div class="overlay hidden" id="profile-overlay">
-  <div class="modal">
-    <header>
-      <h1>Your profile</h1>
-      <span class="spacer"></span>
-      <button class="ghost" id="btn-profile-close">Close</button>
-    </header>
-    <div class="fields" id="profile-fields"></div>
-    <footer>
-      <span class="who" id="profile-msg" style="flex:1;align-self:center"></span>
-      <button class="primary" id="btn-profile-save">Save profile</button>
-    </footer>
-  </div>
 </div>
 
 <script src="/app.js"></script>
