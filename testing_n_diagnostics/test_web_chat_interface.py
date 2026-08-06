@@ -691,3 +691,245 @@ class TestStaticSurface:
 
     def test_healthz(self, client):
         assert client.get("/healthz").json() == {"ok": True}
+
+
+# ==============================================================================
+# 7. Telegram renderer
+# ==============================================================================
+# `bot_telegram._render_events` is the Telegram half of the split: core_session decides
+# *what* happened, this decides what a chat window does about it. It is where the old
+# handler's real bugs lived, so it gets tested directly.
+
+@pytest.fixture(scope="module")
+def bt():
+    """The Telegram bot module, imported with its module-scope `db.init_db()` stubbed.
+
+    The bot calls `init_db()` at import time and that needs a live Postgres. Nothing in
+    the renderer touches the database, so skipping the call is enough to make it testable
+    on a machine with no container running.
+    """
+    import product_inference.db as _db
+    with patch.object(_db, "init_db", lambda *a, **k: None):
+        import product_inference.bot_telegram as module
+    return module
+
+
+class Recorder:
+    """Everything the renderer did, in order."""
+
+    def __init__(self):
+        self.edits = []    # (text, kwargs) applied to the status slot
+        self.replies = []  # text of every new message
+        self.photos = []
+
+
+class FakeSlot:
+    """The placeholder message the renderer edits in place.
+
+    `markdown_ok=False` reproduces Telegram rejecting unbalanced entities; `editable=False`
+    reproduces a message too old (or already deleted) to edit at all.
+    """
+
+    def __init__(self, rec, markdown_ok=True, editable=True):
+        self._rec, self._markdown_ok, self._editable = rec, markdown_ok, editable
+
+    async def edit_text(self, text, **kwargs):
+        if not self._editable:
+            raise RuntimeError("Bad Request: message can't be edited")
+        if kwargs.get("parse_mode") and not self._markdown_ok:
+            raise RuntimeError("Bad Request: can't parse entities")
+        self._rec.edits.append((text, kwargs))
+
+
+class FakeUserMessage:
+    def __init__(self, rec):
+        self._rec = rec
+
+    async def reply_text(self, text, **kwargs):
+        self._rec.replies.append(text)
+        return FakeSlot(self._rec)
+
+
+class FakeUpdate:
+    def __init__(self, rec):
+        self.message = FakeUserMessage(rec)
+        self.effective_chat = type("Chat", (), {"id": 1, "type": "private"})()
+        self.effective_user = type("User", (), {"id": 4242})()
+
+
+class FakeContext:
+    def __init__(self, rec):
+        async def send_photo(chat_id, photo):
+            rec.photos.append(getattr(photo, "name", str(photo)))
+        self.bot = type("Bot", (), {"send_photo": staticmethod(send_photo)})()
+
+
+def render(bt_module, events, markdown_ok=True, editable=True, shown=""):
+    """Drive `_render_events` over a fixed event list and report what landed on screen."""
+    rec = Recorder()
+    update, context = FakeUpdate(rec), FakeContext(rec)
+    slot = FakeSlot(rec, markdown_ok=markdown_ok, editable=editable)
+
+    async def _stream():
+        for event in events:
+            yield event
+
+    asyncio.run(bt_module._render_events(_stream(), update, context, slot, shown=shown))
+    return rec
+
+
+def delivered(rec):
+    """Every piece of text the citizen actually saw."""
+    return [text for text, _ in rec.edits] + rec.replies
+
+
+class TestTelegramMarkdown:
+    def test_double_asterisk_becomes_single(self, bt):
+        # Core events are written in Discord's dialect; Telegram's legacy parser needs
+        # single asterisks and shows the doubled form literally.
+        assert bt._tg_markdown("your **Aadhaar Card** is saved") == "your *Aadhaar Card* is saved"
+
+    def test_spans_newlines(self, bt):
+        assert bt._tg_markdown("**two\nlines**") == "*two\nlines*"
+
+    def test_plain_text_untouched(self, bt):
+        assert bt._tg_markdown("no emphasis here") == "no emphasis here"
+
+    def test_attempts_degrade_to_plain(self, bt):
+        attempts = list(bt._render_attempts("a **b**", markdown=True))
+        assert attempts[0][1]["parse_mode"] == "Markdown"
+        assert attempts[-1] == ("a **b**", {})
+
+    def test_non_markdown_has_one_attempt(self, bt):
+        assert list(bt._render_attempts("x", markdown=False)) == [("x", {})]
+
+
+class TestRenderEvents:
+    def test_status_then_message(self, bt):
+        rec = render(bt, [Status("working"), Message(text="done")])
+        assert [text for text, _ in rec.edits] == ["working", "done"]
+
+    def test_node_enter_is_not_drawn(self, bt):
+        # The state-machine trace is a web side-panel affordance. Echoing every node into
+        # a phone chat would bury the answer.
+        rec = render(bt, [NodeEnter(node="intent_router"), NodeEnter(node="rag")])
+        assert rec.edits == [] and rec.replies == []
+
+    def test_await_confirm_adds_no_button(self, bt):
+        # A one-tap Confirm here would make this surface a second decision point on
+        # whether a government form gets submitted. CONFIRM stays a typed human act.
+        rec = render(bt, [AwaitConfirm(prompt="Reply CONFIRM", session_id="s1")])
+        assert rec.edits == [] and rec.replies == []
+
+    def test_placeholder_is_not_re_sent(self, bt):
+        # Telegram 400s on an edit that changes nothing, and the bot's own placeholder is
+        # the same string run_turn opens with.
+        rec = render(bt, [Status("busy"), Message(text="answer")], shown="busy")
+        assert [text for text, _ in rec.edits] == ["answer"]
+
+    def test_error_is_rendered_like_a_message(self, bt):
+        rec = render(bt, [Error(text="failed", detail="ValueError: x")])
+        assert rec.edits[0][0] == "failed"
+
+    def test_detail_never_reaches_the_chat(self, bt):
+        rec = render(bt, [Error(text="failed", detail="psycopg2 OperationalError at host")])
+        assert "psycopg2" not in " ".join(t for t, _ in rec.edits)
+
+    def test_cancelled_is_rendered(self, bt):
+        rec = render(bt, [Cancelled()])
+        assert rec.edits and "cancel" in rec.edits[0][0].lower()
+
+
+class TestRenderChunking:
+    def test_long_message_keeps_every_chunk(self, bt):
+        # The bug this replaces: the old loop edited the *same* message once per chunk and
+        # then edited it again with the last one, so a long answer arrived as its final
+        # 4,000 characters and everything before it was silently lost.
+        body = "\n".join(f"line {i} " + "x" * 90 for i in range(300))
+        rec = render(bt, [Message(text=body)])
+
+        seen = delivered(rec)
+        assert len(seen) > 1
+        assert "line 0" in seen[0]
+        assert "line 299" in seen[-1]
+
+    def test_no_chunk_exceeds_the_api_limit(self, bt):
+        body = "\n".join("y" * 500 for _ in range(80))
+        rec = render(bt, [Message(text=body)])
+        for text in delivered(rec):
+            assert len(text) <= bt.TELEGRAM_CHUNK_LIMIT
+
+    def test_overflow_chunks_are_new_messages(self, bt):
+        body = "\n".join("z" * 200 for _ in range(60))
+        rec = render(bt, [Message(text=body)])
+        assert len(rec.edits) == 1        # first chunk replaces the placeholder
+        assert len(rec.replies) >= 1      # the rest arrive as fresh messages
+
+
+class TestRenderFallbacks:
+    def test_bad_markdown_falls_back_to_plain(self, bt):
+        # Model output routinely has an odd number of asterisks, which Telegram rejects
+        # outright rather than rendering as-is. The answer must still arrive.
+        rec = render(bt, [Message(text="unbalanced * asterisk")], markdown_ok=False)
+        assert len(rec.edits) == 1
+        assert rec.edits[0][1] == {}                       # retried without parse_mode
+        assert rec.edits[0][0] == "unbalanced * asterisk"  # and unmangled
+
+    def test_dead_slot_falls_back_to_a_new_message(self, bt):
+        rec = render(bt, [Message(text="the answer")], editable=False)
+        assert rec.edits == []
+        assert rec.replies == ["the answer"]
+
+    def test_a_dead_slot_does_not_lose_later_events(self, bt):
+        # Once the placeholder is replaced, the fresh message becomes the slot and the
+        # rest of the turn edits that — nothing after the failure is dropped.
+        rec = render(bt, [Status("working"), Message(text="the answer")], editable=False)
+        assert "the answer" in delivered(rec)
+
+
+class TestRenderImages:
+    def test_screenshot_is_sent(self, bt, tmp_path):
+        shot = tmp_path / "auto_telegram_4242_final_review.png"
+        shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+        rec = render(bt, [Image(path=str(shot), caption="awaiting_confirm")])
+        assert len(rec.photos) == 1
+
+    def test_missing_screenshot_does_not_break_the_turn(self, bt, tmp_path):
+        # A screenshot the automation never wrote must not swallow the text answer.
+        rec = render(bt, [
+            Image(path=str(tmp_path / "nope.png")),
+            Message(text="here is your status"),
+        ])
+        assert rec.photos == []
+        assert rec.edits[0][0] == "here is your status"
+
+
+class TestTelegramWiring:
+    def test_web_command_sends_a_handoff_link(self, bt):
+        rec = Recorder()
+        asyncio.run(bt.web_command(FakeUpdate(rec), FakeContext(rec)))
+        assert len(rec.replies) == 1
+        assert "/auth?t=" in rec.replies[0]
+
+    def test_web_command_warns_the_link_is_an_identity(self, bt):
+        rec = Recorder()
+        asyncio.run(bt.web_command(FakeUpdate(rec), FakeContext(rec)))
+        assert "forward" in rec.replies[0].lower()
+
+    def test_web_handler_is_registered(self, bt):
+        assert 'CommandHandler("web", web_command)' in inspect.getsource(bt.main)
+
+    def test_the_duplicated_pipeline_is_actually_gone(self, bt):
+        # This is the point of the refactor, not a style preference: the document
+        # pipeline and the screenshot map used to exist once per bot, which is how
+        # bot_audio.py ended up with neither. The bot must no longer reach for the
+        # graph or the extractor itself.
+        source = inspect.getsource(bt)
+        assert "graph_app" not in source
+        assert "analyze_document" not in source
+        assert "_final_review.png" not in source
+
+    def test_form_flow_is_imported_not_redefined(self, bt):
+        source = inspect.getsource(bt)
+        assert "FORM_FLOW = [" not in source
+        assert bt.FORM_FLOW is pf.FORM_FLOW
