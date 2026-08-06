@@ -29,6 +29,7 @@ from sarvamai import SarvamAI
 
 import product_inference.db as db
 from core_inference.graph import graph_app
+from core_inference import session as core_session
 
 # ── ENV SETUP ─────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -425,14 +426,9 @@ async def on_message(message: discord.Message):
         if old and not old.done():
             old.cancel()
         try:
-            import psycopg2
-            from product_inference.db import DB_PARAMS
-            conn = psycopg2.connect(**DB_PARAMS)
-            cur = conn.cursor()
-            for tbl, col in [("user_profiles","platform_id"),("pii_vault","user_id"),
-                              ("checkpoints","thread_id"),("checkpoint_writes","thread_id")]:
-                cur.execute(f"DELETE FROM {tbl} WHERE {col} = %s;", (user_id,))
-            conn.commit(); cur.close(); conn.close()
+            # Shared with bot.py / bot_telegram.py / the web surface, so a voice-mode reset
+            # erases the browser profile too rather than leaving portal logins behind.
+            await asyncio.to_thread(core_session.do_reset, user_id)
             await message.channel.send("Profile reset complete. Send a message to start fresh!")
         except Exception as e:
             print(f"[Reset Error] {e}")
@@ -592,14 +588,8 @@ async def tg_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if old and not old.done():
         old.cancel()
     try:
-        import psycopg2
-        from product_inference.db import DB_PARAMS
-        conn = psycopg2.connect(**DB_PARAMS)
-        cur = conn.cursor()
-        for tbl, col in [("user_profiles","platform_id"),("pii_vault","user_id"),
-                          ("checkpoints","thread_id"),("checkpoint_writes","thread_id")]:
-            cur.execute(f"DELETE FROM {tbl} WHERE {col} = %s;", (user_id,))
-        conn.commit(); cur.close(); conn.close()
+        # Same shared reset as every other surface — see the Discord branch above.
+        await asyncio.to_thread(core_session.do_reset, user_id)
         await update.message.reply_text("Profile reset complete. Send a message to start fresh!")
     except Exception as e:
         print(f"[Reset Error] {e}")

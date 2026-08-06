@@ -34,6 +34,28 @@ import concurrent.futures
 from typing import Optional, Callable, Any
 from playwright.sync_api import sync_playwright, BrowserContext, Page, Dialog, Error as PlaywrightError
 
+# Root directory holding one persistent Chrome profile per citizen. Overridable via env so
+# the path is not pinned to one developer's machine; the default is deliberately left as it
+# was, so profiles a citizen has already logged a portal into keep working across this change.
+BROWSER_PROFILES_ROOT = os.getenv(
+    "YM_BROWSER_PROFILES_DIR",
+    "C:/Users/nezam/.gemini/antigravity/browser_profiles",
+)
+
+
+def profile_dir_for(user_id: str, profile_base_dir: Optional[str] = None) -> str:
+    """Absolute path of `user_id`'s persistent Chrome profile directory.
+
+    Single source of truth for the `user_` prefix. `/reset` has to delete exactly the
+    directory `launch_isolated_profile` creates, and re-deriving that name at the deletion
+    site is precisely how the two drift apart and a reset silently leaves portal cookies
+    on disk.
+    """
+    return os.path.abspath(
+        os.path.join(profile_base_dir or BROWSER_PROFILES_ROOT, f"user_{user_id}")
+    )
+
+
 # Global executor for running synchronous Playwright calls in a clean thread outside any asyncio event loop
 _PW_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="PW_Sync_Worker")
 
@@ -101,7 +123,7 @@ def launch_isolated_profile(
     user_id: str,
     portal_url: Optional[str] = None,
     headless: bool = False,
-    profile_base_dir: str = "C:/Users/nezam/.gemini/antigravity/browser_profiles"
+    profile_base_dir: Optional[str] = None
 ) -> tuple[BrowserContext, Page]:
     """
     Launches or retrieves an isolated Playwright persistent browser profile for `user_id`.
@@ -119,7 +141,7 @@ def launch_isolated_profile(
         except Exception:
             pass # Context or page crashed; re-launch
 
-    profile_dir = os.path.abspath(os.path.join(profile_base_dir, f"user_{user_id}"))
+    profile_dir = profile_dir_for(user_id, profile_base_dir)
     os.makedirs(profile_dir, exist_ok=True)
 
     playwright = sync_playwright().start()

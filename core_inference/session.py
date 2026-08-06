@@ -23,6 +23,8 @@ may be called from a thread that is also running Playwright's sync API.
 import asyncio
 import json
 import os
+import shutil
+import stat
 import time
 from typing import AsyncIterator, Optional
 
@@ -323,16 +325,101 @@ async def ingest_document(
 # 3. RESET
 # ==============================================================================
 
+def _force_remove(func, path, exc_info):
+    """rmtree error hook: clear the read-only bit and retry once.
+
+    Chrome leaves read-only files inside a profile directory, and on Windows `os.unlink`
+    refuses those outright. Without this, rmtree aborts partway and leaves a half-deleted
+    profile that still holds portal cookies.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        raise
+
+
+def browser_session_ids(user_id: str) -> list[str]:
+    """Every browser-session id a citizen's automation can have run under.
+
+    The on-disk profile name is built in two layers that live in different files:
+    `graph.py:714` launches automation as `f"auto_{user_id}"`, and `browser_manager`
+    then prefixes `user_`. So a citizen's real directory is `user_auto_telegram_123`,
+    not `user_telegram_123` — which is exactly what is on disk.
+
+    Both ids are returned because `launch_isolated_profile` is also called with a bare
+    id directly (`test_integration.py:91`, the `check_*.py` diagnostics), and a reset
+    that only guessed one of the two conventions would report success having deleted
+    nothing.
+    """
+    return [f"auto_{user_id}", user_id]
+
+
+def wipe_browser_profile(user_id: str) -> bool:
+    """Close any live browser session and delete this citizen's persistent Chrome profiles.
+
+    Returns True if at least one profile directory was removed.
+
+    This is the part of `/reset` that was missing. The DB wipe erased the profile, the
+    vault and the conversation, but left the cookies that keep a citizen *logged into a
+    government portal* sitting on disk — on a shared or family machine that is the single
+    artefact a reset most needs to take with it.
+
+    Closing before deleting is not optional on Windows: Chrome holds an exclusive lock on
+    its user-data directory, so rmtree against a live profile fails mid-tree.
+    """
+    try:
+        from product_inference import browser_manager
+    except Exception as e:
+        # Playwright missing (voice-only or web-only deployments never import it). The DB
+        # wipe has already happened; a browser profile cannot exist without the launcher.
+        print(f"[reset] Browser manager unavailable, skipping profile wipe: {e}")
+        return False
+
+    if not user_id:
+        print("[reset] Refusing to wipe browser profiles for a blank user_id")
+        return False
+
+    root = os.path.normcase(os.path.abspath(browser_manager.BROWSER_PROFILES_ROOT))
+    removed = False
+
+    for session_id in browser_session_ids(user_id):
+        try:
+            browser_manager.close_session(session_id)
+        except Exception as e:
+            print(f"[reset] Could not close browser session {session_id}: {e}")
+
+        path = browser_manager.profile_dir_for(session_id)
+
+        # Guard against an odd id resolving to the shared root and taking every citizen's
+        # profile with it.
+        if os.path.normcase(path) == root:
+            print(f"[reset] Refusing to delete profile root for session_id={session_id!r}")
+            continue
+
+        if not os.path.isdir(path):
+            continue
+
+        try:
+            shutil.rmtree(path, onexc=_force_remove)
+            print(f"[reset] Deleted browser profile {os.path.basename(path)}")
+            removed = True
+        except Exception as e:
+            print(f"[reset] Could not delete browser profile {os.path.basename(path)}: {e}")
+
+    return removed
+
+
 def do_reset(user_id: str) -> None:
-    """Wipe a citizen's profile, vault, and checkpointer state.
+    """Wipe a citizen's profile, vault, checkpointer state, and browser profile.
 
-    Moved verbatim from `bot.py:48-60`, where it was a module-local function no other
-    surface could import (Telegram carried its own inline copy).
+    Moved from `bot.py:48-60`, where it was a module-local function no other surface could
+    import — which is why four separate copies existed (Discord, Telegram, and both halves
+    of `bot_audio.py`) and why none of them deleted the browser profile.
 
-    Behaviour is deliberately unchanged, including a known gap: this does **not** delete
-    `browser_profiles/<user_id>/`, despite CLAUDE.md stating that `/reset` does. Fixing
-    that changes what a citizen's `/reset` actually erases, so it belongs in its own
-    change rather than riding along with a refactor.
+    The database wipe runs first and unguarded: if erasing the browser profile fails, the
+    citizen's PII is still gone. Reversing that order would let a locked Chrome directory
+    keep their Aadhaar extract in the vault.
     """
     import psycopg2
     from product_inference.db import DB_PARAMS
@@ -346,3 +433,5 @@ def do_reset(user_id: str) -> None:
     conn.commit()
     cur.close()
     conn.close()
+
+    wipe_browser_profile(user_id)
