@@ -169,6 +169,20 @@ See `testing_n_diagnostics/eval_web_automation.md` for the full walkthrough, the
 
 ---
 
+## How This Was Built
+
+The architecture, the product decisions and the engineering constraints in this repository are mine. **Claude Code** was used as an implementation partner on two specific bodies of work, where I set the direction and reviewed the result and it wrote the bulk of the code.
+
+**The browser chat interface** (`product_inference/web/`, `core_inference/events.py`, `core_inference/session.py`). The constraint I set was that the browser must be a *renderer* over the same turn logic the bots already run — never a second decision point on submitting a government form. That ruled out the obvious implementation, where the web surface grows its own copy of the pipeline; instead the turn moved into one shared session layer emitting typed events, and every surface just draws them. Two decisions followed from it and both held: the web Confirm button sends the literal string `CONFIRM` through the ordinary chat path rather than a privileged route, so the graph's HITL gate remains the only thing that can authorize a submit; and browser identity is *delegated* from an already-authenticated Telegram session via a signed handoff token, because building a login next to a PII vault is not a trade I wanted to make.
+
+**The evaluation suites** (`testing_n_diagnostics/`). Chiefly the ground-truth eval for hybrid RAG scheme matching — the labeled query→expected-scheme dataset verified against live `government_schemes` values rather than scraped eligibility text, and the hard-negative boundary cases. Before it, the persona suite asserted only that a response came back non-empty, which is not a measurement of retrieval.
+
+Review stayed with me, and it was load-bearing. One example: the shared `/reset` implementation initially derived the browser profile directory as `user_<user_id>`, when automation actually creates `user_auto_<user_id>` — the two halves of that name are assembled in different files. It would have deleted nothing and reported success, leaving live government-portal logins on disk after a citizen asked to be forgotten. It was caught by running the reset against a real profile directory instead of trusting the code path.
+
+Commits on the browser-interface work carry a `Co-Authored-By: Claude` trailer. The evaluation work predates that convention and is credited here instead.
+
+---
+
 ## Repository Structure
 
 ```text
