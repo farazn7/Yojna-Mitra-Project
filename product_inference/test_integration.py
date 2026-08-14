@@ -15,7 +15,7 @@ def test_pdf_form_routing():
         "messages": [],
         "summary": "",
         "onboarding_step": "PROFILE_COMPLETE",
-        "user_profile": {"full_name": "Nezam Rahman"},
+        "user_profile": {"full_name": "Reni Lax"},
         "last_discussed_schemes": [],
         "current_intent": "LAUNCH_AUTOMATION",
         "user_id": "test_user_pdf",
@@ -26,7 +26,7 @@ def test_pdf_form_routing():
         "skipped_documents": [],
         "awaiting_document": "",
         "user_input_scheme": "",
-        "vault_snapshot": {"verified_name": "Nezam Rahman"}
+        "vault_snapshot": {"verified_name": "Reni Lax"}
     }
 
     # Mock db.get_scheme_application_info to return a PDF scheme
@@ -41,7 +41,7 @@ def test_pdf_form_routing():
     }
 
     with patch("product_inference.db.get_scheme_application_info", return_value=mock_app_info), \
-         patch("product_inference.db.get_vault_data", return_value={"verified_name": "Nezam Rahman"}):
+         patch("product_inference.db.get_vault_data", return_value={"verified_name": "Reni Lax"}):
         result = launch_automation(state)
         print(f"[Result Status] mode={result.get('application_mode')} | status={result.get('automation_status')}")
         resp_clean = str(result.get('response', '')).encode('ascii', 'replace').decode('ascii')
@@ -61,7 +61,7 @@ def test_online_portal_react_routing():
         "summary": "",
         "onboarding_step": "PROFILE_COMPLETE",
         "user_profile": {
-            "full_name": "Nezam Rahman",
+            "full_name": "Reni Lax",
             "district": "Chennai",
             "mobile": "9876543210"
         },
@@ -75,7 +75,7 @@ def test_online_portal_react_routing():
         "skipped_documents": [],
         "awaiting_document": "",
         "user_input_scheme": "",
-        "vault_snapshot": {"verified_name": "Nezam Rahman"}
+        "vault_snapshot": {"verified_name": "Reni Lax"}
     }
 
     mock_app_info = {
@@ -86,7 +86,7 @@ def test_online_portal_react_routing():
     }
 
     with patch("product_inference.db.get_scheme_application_info", return_value=mock_app_info), \
-         patch("product_inference.db.get_vault_data", return_value={"verified_name": "Nezam Rahman"}):
+         patch("product_inference.db.get_vault_data", return_value={"verified_name": "Reni Lax"}):
         from product_inference.browser_manager import launch_isolated_profile
         ctx, page = launch_isolated_profile("test_user_online", portal_url="about:blank", headless=True)
         mock_wizard_step1 = """
