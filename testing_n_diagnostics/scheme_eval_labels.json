@@ -5,7 +5,7 @@
     "known_issues_surfaced": [
       "p3: both textually-plausible Folk Artist schemes are excluded by the SQL hard filter given current DB column values ('Pension Scheme - Folk Artist' has min_age=60, which doesn't encode the eligibility text's under-60-disabled exception; 'Scheme of Extending Financial Assistance to Folk Artists...' has max_income=2000, which looks like a mis-extracted grant amount rather than an income cap).",
       "p10: 'Indira Gandhi National Old Age Pension Scheme -Tamil Nadu' has is_women_only=True in the DB despite gender-neutral eligibility text -- likely an LLM-extraction error, possibly confused with the sibling Widow Pension scheme during ingestion -- and is therefore excluded for this Male persona.",
-      "p5: 'Unemployed Youth Employment Generation Programme' exists as 2 duplicate rows in government_schemes with identical column values -- both pass the SQL filter independently and may both surface in schemes_fetched, consuming two of the top_k slots with the same name.",
+      "p5: RESOLVED 2026-08-15. 'Unemployed Youth Employment Generation Programme' used to exist as 2 duplicate rows in government_schemes -- both passed the SQL filter independently and consumed two of the top_k slots with the same name. Root cause was data_extraction/schemes.json shipping its first 5 records twice (indices 0-4 were stale un-enriched copies of 5-9); the blind INSERT in extract_schema_llm.py let both through. The 5 duplicate rows were deleted, the source JSON was deduped to 229 records, and government_schemes now carries UNIQUE(scheme_name) with ON CONFLICT DO NOTHING on ingest.",
       "hn4: the same scheme's DB max_age=35 is a flat bound that doesn't encode the eligibility text's stated 45-year age relaxation for special categories (SC/ST/MBC/BC/Minorities/Ex-Servicemen/Differently abled/Transgender) -- same category-exception-not-encoded issue as p3."
     ]
   },
@@ -53,7 +53,7 @@
       ],
       "confidence": "high",
       "near_miss_blocklist": [],
-      "note": "Verified live: min_age=18, max_age=35, max_income=500000; passes for age 26, income null->0. KNOWN DUPLICATE: exists as 2 identical rows in government_schemes -- both independently pass the filter and may both appear in schemes_fetched. The test logs this duplication as a diagnostic, it does not fail on it."
+      "note": "Verified live: min_age=18, max_age=35, max_income=500000; passes for age 26, income null->0. Formerly duplicated as 2 identical rows (see _meta.known_issues_surfaced); deduped 2026-08-15 and now protected by UNIQUE(scheme_name). The test's duplicate-detection diagnostic is retained as a regression tripwire -- it should now stay silent."
     },
     {
       "persona_id": "p6_fisherman_distress",

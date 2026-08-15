@@ -34,7 +34,14 @@ def setup_database():
     cur.execute("""
         CREATE TABLE government_schemes (
             id SERIAL PRIMARY KEY,
-            scheme_name TEXT,
+            -- UNIQUE because schemes.json has shipped the same scheme twice before, and a
+            -- blind INSERT let both rows through. Two identical rows both clear the SQL
+            -- filter in hybrid_rag.py and then occupy two of the citizen's top_k slots with
+            -- the same scheme, which costs a real recommendation. Worse, the duplicate rows
+            -- were not actually identical: metadata comes from an LLM extraction pass, so
+            -- the same source text produced max_age=40 on one copy and NULL on the other,
+            -- meaning which row won the ranking decided whether a citizen was eligible.
+            scheme_name TEXT UNIQUE,
             portal_url TEXT,
             details TEXT,
             eligibility_rules TEXT,
@@ -113,6 +120,7 @@ def main():
             (scheme_name, portal_url, details, eligibility_rules, documents_needed,
              min_age, max_age, max_income, target_professions, is_differently_abled, is_women_only, embedding)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (scheme_name) DO NOTHING
         """, (
             scheme_name,
             scheme.get('portal_url', ''),
@@ -128,8 +136,14 @@ def main():
             vector
         ))
         
-        print(f"[{i}/{len(schemes)}] Ingested: {scheme_name}")
-        print(f"    -> LLM Found: Professions: {metadata.target_professions} | Income: <{metadata.max_income}")
+        # rowcount is 0 when ON CONFLICT skipped the row. Say so rather than printing
+        # "Ingested" for a scheme that was not written -- a silent skip here is how the
+        # duplicate pairs went unnoticed in the first place.
+        if cur.rowcount:
+            print(f"[{i}/{len(schemes)}] Ingested: {scheme_name}")
+            print(f"    -> LLM Found: Professions: {metadata.target_professions} | Income: <{metadata.max_income}")
+        else:
+            print(f"[{i}/{len(schemes)}] SKIPPED (duplicate scheme_name already ingested): {scheme_name}")
 
     print("✅ All schemes ingested successfully with persistent metadata arrays and embeddings!")
     
