@@ -46,18 +46,15 @@ async def on_ready():
     print(f'==========================================')
 
 def _do_reset(user_id: str):
-    """Shared reset logic (sync): wipes profile, vault, and checkpointer state from DB."""
-    import psycopg2
-    from product_inference.db import DB_PARAMS
-    conn = psycopg2.connect(**DB_PARAMS)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM user_profiles WHERE platform_id = %s;", (user_id,))
-    cur.execute("DELETE FROM pii_vault WHERE user_id = %s;", (user_id,))
-    cur.execute("DELETE FROM checkpoints WHERE thread_id = %s;", (user_id,))
-    cur.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s;", (user_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    """Shared reset logic (sync): wipes profile, vault, checkpointer state and browser profile.
+
+    Delegates so that Discord, Telegram, voice and the browser surface all erase exactly the
+    same things. This used to be one of four hand-maintained copies, and the copies had
+    already drifted — none of them deleted the persistent Chrome profile, so a citizen who
+    reset still had live portal logins on disk.
+    """
+    from core_inference import session as core_session
+    core_session.do_reset(user_id)
 
 # ---------------------------------------------------------
 # FORM-BASED PROFILE UI  (all 13 fields across 3 steps)
@@ -522,7 +519,14 @@ def _handle_shutdown(sig, frame):
     _active_tasks.clear()
     raise SystemExit(0)
 
-signal.signal(signal.SIGINT, _handle_shutdown)
-signal.signal(signal.SIGTERM, _handle_shutdown)
+if __name__ == "__main__":
+    # Both of these are process-wide side effects, so they must not fire on import.
+    # Without the guard, `import product_inference.bot` logged into Discord and blocked
+    # forever, *and* silently took over the importing process's SIGINT/SIGTERM handling —
+    # which is why the reset test had to read this file as text instead of importing it.
+    # `python -m product_inference.bot` still sets __name__ to "__main__", so the
+    # documented way to run the Discord bot is unchanged.
+    signal.signal(signal.SIGINT, _handle_shutdown)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
 
-bot.run(TOKEN)
+    bot.run(TOKEN)

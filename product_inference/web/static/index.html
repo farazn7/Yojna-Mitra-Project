@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yojana Mitra</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="shell" id="shell">
+
+  <div class="main">
+    <header>
+      <h1>🇮🇳 Yojana Mitra</h1>
+      <span class="who" id="who"></span>
+      <span class="spacer"></span>
+      <button class="ghost" id="btn-panel" style="display:none">Panel</button>
+      <button class="ghost" id="btn-profile">Profile</button>
+      <button class="ghost" id="btn-reset">Reset</button>
+    </header>
+
+    <div id="log"></div>
+
+    <div id="status" class="hidden"><span class="dot"></span><span id="status-text"></span></div>
+
+    <div id="gate" class="hidden">
+      <p id="gate-text">Ready to submit.</p>
+      <div class="row">
+        <button class="primary" id="btn-confirm">Confirm &amp; submit</button>
+        <button class="ghost" id="btn-dismiss">Not yet</button>
+      </div>
+    </div>
+
+    <!-- A nudge, not a gate. Scheme search works without a complete profile; each
+         answered field just adds a line to the personalisation context. -->
+    <div id="nudge" class="hidden">
+      <span id="nudge-text"></span>
+      <button class="link" id="btn-nudge">Complete profile</button>
+    </div>
+
+    <form id="composer" autocomplete="off">
+      <label class="upload" for="file" title="Upload a document (PDF, PNG, JPG)">📎</label>
+      <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg">
+      <textarea id="input" rows="1" placeholder="Ask about a scheme, or type CONFIRM to approve a submission…"></textarea>
+      <button class="primary" type="submit" id="btn-send">Send</button>
+    </form>
+  </div>
+
+  <aside class="side">
+    <!-- Narrow screens show the panel full-bleed over the chat, which hides the header
+         holding the toggle. Without this the citizen has no way back to the conversation. -->
+    <button class="ghost back" id="btn-back">← Back to chat</button>
+    <!-- The profile lives here rather than in a modal so answering it never takes the
+         conversation off screen: the citizen can read the last reply while filling it in,
+         and can stop halfway without losing what they typed. -->
+    <div class="section" id="profile-section">
+      <h2>
+        <button class="disclose" id="btn-profile-toggle" aria-expanded="false" aria-controls="profile-body">
+          <span class="caret">▸</span> Your profile
+        </button>
+        <span class="tally" id="profile-tally"></span>
+      </h2>
+      <div id="profile-body" class="hidden">
+        <p class="hint">
+          Optional. Every answer sharpens which schemes you're shown — nothing here is required to chat.
+        </p>
+        <div class="fields" id="profile-fields"></div>
+        <div class="save-row">
+          <button class="primary" id="btn-profile-save">Save</button>
+          <span class="who" id="profile-msg"></span>
+        </div>
+      </div>
+    </div>
+    <div class="section grow">
+      <h2>Graph trace</h2>
+      <div id="trace"><div class="empty">Nodes light up here as the state machine runs.</div></div>
+    </div>
+    <div class="section">
+      <h2>Automation</h2>
+      <div id="shots"><div class="empty">Portal screenshots appear here during an application.</div></div>
+    </div>
+  </aside>
+
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

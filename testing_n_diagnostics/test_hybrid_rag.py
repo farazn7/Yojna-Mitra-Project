@@ -5,6 +5,14 @@ import ollama
 import os
 import re
 import time
+from pathlib import Path
+
+# Paths are anchored to this file, not the working directory. `personas/personas.json`
+# only resolved when pytest happened to be invoked from inside `testing_n_diagnostics/`,
+# so collecting from the repo root failed outright — and `LOG_FILE` below is worse: it
+# is deleted at import time, so a bare relative name means merely *collecting* this
+# module wipes a `rag_evaluation_log.md` belonging to whatever directory you stood in.
+_HERE = Path(__file__).resolve().parent
 
 # ── Dynamic Query Mapping ──────────────────────────────────────────────────
 # Realistic colloquial queries paired strictly to each human persona ID
@@ -22,10 +30,10 @@ TEST_QUERIES = {
 }
 
 def get_personas():
-    with open('personas/personas.json', 'r', encoding='utf-8') as f:
+    with open(_HERE / 'personas' / 'personas.json', 'r', encoding='utf-8') as f:
         return json.load(f)
 
-LOG_FILE = "rag_evaluation_log.md"
+LOG_FILE = _HERE / "rag_evaluation_log.md"
 if os.path.exists(LOG_FILE):
     os.remove(LOG_FILE)
 

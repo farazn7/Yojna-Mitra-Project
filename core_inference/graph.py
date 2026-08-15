@@ -576,6 +576,20 @@ def request_next_document(state: ConversationState) -> dict:
     }
 
 
+# The one wording of the final review gate. Both paths that can reach the gate must say the same
+# thing: `launch_automation` (portal needed nothing from the citizen) and `handle_automation_response`
+# (the citizen answered an OTP/HITL question first). These had drifted into two messages, and the
+# resume path — the *more* common one, since any portal with an OTP goes through HITL — had lost the
+# sentence stating that the halt before the submit button is deliberate. That sentence is the
+# zero-auto-submit promise as the citizen experiences it, so it does not get to vary by code path.
+FINAL_REVIEW_GATE_RESPONSE = (
+    "[Final Review Gate] **Automated Application Form Filled Up to Final Review Gate!**\n\n"
+    "In accordance with Citizen Safety Rules, I have halted right before the final submission button.\n"
+    "Please review the attached portal screenshot carefully to ensure all details match your expectations.\n\n"
+    "If everything looks correct, reply with **CONFIRM** to execute the final official submission!"
+)
+
+
 def launch_automation(state: ConversationState) -> dict:
     """Launches Phase 8 ReAct automation engine or provides physical/PDF guidelines per citizen preference."""
     target_scheme = state.get("target_scheme", "")
@@ -747,12 +761,7 @@ def launch_automation(state: ConversationState) -> dict:
                 "application_mode": mode,
                 "application_form_url": target_url,
                 "automation_unresolved_fields": [],
-                "response": (
-                    f"[Final Review Gate] **Automated Application Form Filled Up to Final Review Gate!**\n\n"
-                    "In accordance with Citizen Safety Rules, I have halted right before the final submission button.\n"
-                    "Please review the attached portal screenshot carefully to ensure all details match your expectations.\n\n"
-                    "If everything looks correct, reply with **CONFIRM** to execute the final official submission!"
-                )
+                "response": FINAL_REVIEW_GATE_RESPONSE
             }
         elif new_status == "form_complete":
             return {
@@ -1116,10 +1125,7 @@ def handle_automation_response(state: ConversationState) -> dict:
                     "automation_status": "awaiting_confirm",
                     "automation_unresolved_fields": [],
                     "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {},
-                    "response": (
-                        f"[Final Review Gate] **Form Filled Up to Final Review Gate!**\n\n"
-                        "Please review the portal screenshot carefully. If everything looks correct, reply with **CONFIRM** to execute the final official submission!"
-                    )
+                    "response": FINAL_REVIEW_GATE_RESPONSE
                 }
             elif new_status == "form_complete":
                 return {"automation_status": "complete", "automation_unresolved_fields": [], "automation_ask_counts": {}, "automation_page_memory": {}, "automation_hitl_answers": {}, "response": "[SUCCESS] **Application Successfully Submitted!**"}
